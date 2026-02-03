@@ -1,0 +1,99 @@
+use std::io;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{backend::CrosstermBackend, Terminal};
+use anyhow::Result;
+
+mod app;
+mod ui;
+mod shell;
+
+use app::App;
+use ui::TreeWidget;
+use shell::{has_shell_integration, setup_shell_integration};
+
+fn main() -> Result<()> {
+    // Check for arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--setup") {
+        setup_shell_integration()?;
+        return Ok(());
+    }
+
+    if !has_shell_integration()? {
+        print_install_required();
+        return Ok(());
+    }
+
+    // Setup terminal
+    enable_raw_mode()?;
+    // Use stderr for TUI to leave stdout clean for piping the result
+    let mut stderr = io::stderr();
+    execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Create app
+    let app = App::new()?;
+    let res = run_app(&mut terminal, app);
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    match res {
+        Ok(Some(path)) => println!("{}", path),
+        Err(err) => eprintln!("{:?}", err),
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn print_install_required() {
+    eprintln!("cdtree shell integration is not set up, so it cannot start.");
+    eprintln!("Please run the following:\n");
+    eprintln!("  cdtree --setup");
+    eprintln!("\nAfter setting it up, reload your shell.");
+}
+
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<Option<String>> 
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
+    loop {
+        terminal.draw(|f| {
+            let ui = TreeWidget::new(&mut app);
+            f.render_widget(ui, f.area());
+        }).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        if event::poll(std::time::Duration::from_millis(250))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Char('f') => app.toggle_show_files(),
+                    KeyCode::Char('h') => app.toggle_show_hidden(),
+                    KeyCode::Up => app.move_selection(-1),
+                    KeyCode::Down => app.move_selection(1),
+                    KeyCode::Right => app.expand_current(),
+                    KeyCode::Left => app.on_left(),
+                    KeyCode::Enter => {
+                        if app.is_selected_dir() {
+                            let path = app.selected_path.to_string_lossy().to_string();
+                            return Ok(Some(path));
+                        }
+                    }
+                     _ => {}
+                }
+            }
+        }
+    }
+}
