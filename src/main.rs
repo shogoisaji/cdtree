@@ -80,11 +80,11 @@ where
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                     KeyCode::Char('f') => app.toggle_show_files(),
-                    KeyCode::Char('h') => app.toggle_show_hidden(),
-                    KeyCode::Up => app.move_selection(-1),
-                    KeyCode::Down => app.move_selection(1),
-                    KeyCode::Right => app.expand_current(),
-                    KeyCode::Left => app.on_left(),
+                    KeyCode::Char('a') => app.toggle_show_hidden(),
+                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                    KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
+                    KeyCode::Left | KeyCode::Char('h') => app.on_left(),
                     KeyCode::Enter => {
                         if app.is_selected_dir() {
                             let path = app.selected_path.to_string_lossy().to_string();
