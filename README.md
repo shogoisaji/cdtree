@@ -15,7 +15,7 @@ A simple CLI tool to navigate directories with a tree view, similar to `tree` bu
 - Broot-style automatic configuration.
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/cdtree_demo.mov" width="100%" />
+  <img src="assets/cdtree_demo.gif" width="100%" alt="cdtree demo" />
 </div>
 
 ## Installation
