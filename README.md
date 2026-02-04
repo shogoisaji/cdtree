@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/cdtree_logo.png" alt="cdtree logo" width="200">
+  <img src="assets/cdtree_logo.png" alt="cdtree logo" width="500">
 </p>
 
 # cdtree
@@ -14,7 +14,19 @@ A simple CLI tool to navigate directories with a tree view, similar to `tree` bu
 - Shell integration to change the parent directory.
 - Broot-style automatic configuration.
 
+<div align="center">
+  <img src="assets/cdtree_demo.gif" width="100%" alt="cdtree demo" />
+</div>
+
 ## Installation
+
+### Homebrew (macOS)
+
+```bash
+brew install shogoisaji/cdtree/cdtree
+```
+
+### Cargo
 
 Requires Rust and Cargo.
 
