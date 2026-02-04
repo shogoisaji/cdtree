@@ -88,3 +88,102 @@ function cdtree() {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_support::{env_lock, EnvGuard};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            path.push(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn has_shell_integration_detects_source_line_in_zshrc() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_home");
+        let _guard = EnvGuard::set("HOME", temp.path.to_str().unwrap());
+
+        let launcher_path = temp
+            .path
+            .join(".config")
+            .join("cdtree")
+            .join("launcher")
+            .join("bash")
+            .join("cdtree");
+        let source_line = format!("source \"{}\"", launcher_path.to_string_lossy());
+
+        let zshrc = temp.path.join(".zshrc");
+        fs::write(&zshrc, format!("{}\n", source_line)).unwrap();
+
+        assert!(has_shell_integration().unwrap());
+    }
+
+    #[test]
+    fn has_shell_integration_checks_bashrc_if_zshrc_missing() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_home");
+        let _guard = EnvGuard::set("HOME", temp.path.to_str().unwrap());
+
+        let launcher_path = temp
+            .path
+            .join(".config")
+            .join("cdtree")
+            .join("launcher")
+            .join("bash")
+            .join("cdtree");
+        let source_line = format!("source \"{}\"", launcher_path.to_string_lossy());
+
+        let bashrc = temp.path.join(".bashrc");
+        fs::write(&bashrc, format!("{}\n", source_line)).unwrap();
+
+        assert!(has_shell_integration().unwrap());
+    }
+
+    #[test]
+    fn setup_shell_integration_creates_launcher_and_updates_rc() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_home");
+        let _guard = EnvGuard::set("HOME", temp.path.to_str().unwrap());
+
+        let zshrc = temp.path.join(".zshrc");
+        fs::write(&zshrc, "# test\n").unwrap();
+
+        setup_shell_integration().unwrap();
+
+        let launcher_path = temp
+            .path
+            .join(".config")
+            .join("cdtree")
+            .join("launcher")
+            .join("bash")
+            .join("cdtree");
+        assert!(launcher_path.exists());
+
+        let source_line = format!("source \"{}\"", launcher_path.to_string_lossy());
+        let content = fs::read_to_string(&zshrc).unwrap();
+        assert!(content.contains(&source_line));
+    }
+}
