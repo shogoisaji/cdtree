@@ -378,3 +378,224 @@ impl App {
          }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_support::{env_lock, CurrentDirGuard, EnvGuard};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            path.push(format!("{}_{}_{}", prefix, std::process::id(), nanos));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn create_dir(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    fn create_file(path: &Path) {
+        fs::write(path, b"test").unwrap();
+    }
+
+    fn sample_app() -> App {
+        let mut root = FileNode::new(PathBuf::from("/root"), true);
+        let mut a = FileNode::new(PathBuf::from("/root/a"), true);
+        a.expanded = true;
+        a.children = Some(vec![
+            FileNode::new(PathBuf::from("/root/a/aa"), true),
+            FileNode::new(PathBuf::from("/root/a/ab"), false),
+        ]);
+        let b = FileNode::new(PathBuf::from("/root/b"), true);
+        root.expanded = true;
+        root.children = Some(vec![a, b]);
+
+        App {
+            root,
+            selected_path: PathBuf::from("/root"),
+            startup_path: PathBuf::from("/root"),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+        }
+    }
+
+    #[test]
+    fn load_children_filters_and_sorts() {
+        let temp = TempDir::new("cdtree_load_children");
+        let root = temp.path.join("root");
+        create_dir(&root);
+        create_dir(&root.join("a_dir"));
+        create_dir(&root.join("b_dir"));
+        create_dir(&root.join(".hdir"));
+        create_file(&root.join("a.txt"));
+        create_file(&root.join("z.txt"));
+        create_file(&root.join(".hidden"));
+
+        let mut node = FileNode::new(root.clone(), true);
+        node.load_children(false, false).unwrap();
+        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        assert_eq!(names, vec!["a_dir", "b_dir"]);
+
+        node.load_children(true, false).unwrap();
+        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        assert_eq!(names, vec!["a_dir", "b_dir", "a.txt", "z.txt"]);
+
+        node.load_children(true, true).unwrap();
+        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        assert_eq!(
+            names,
+            vec![".hdir", "a_dir", "b_dir", ".hidden", "a.txt", "z.txt"]
+        );
+    }
+
+    #[test]
+    fn get_visible_nodes_prefix_and_order() {
+        let app = sample_app();
+        let visible = app.get_visible_nodes();
+        let got: Vec<(String, String)> = visible
+            .iter()
+            .map(|(prefix, node)| (prefix.clone(), node.name()))
+            .collect();
+        let expected = vec![
+            ("".to_string(), "root".to_string()),
+            ("├─ ".to_string(), "a".to_string()),
+            ("│  ├─ ".to_string(), "aa".to_string()),
+            ("│  └─ ".to_string(), "ab".to_string()),
+            ("└─ ".to_string(), "b".to_string()),
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn move_selection_clamps_to_bounds() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a");
+        app.move_selection(-10);
+        assert_eq!(app.selected_path, PathBuf::from("/root"));
+        app.move_selection(10);
+        assert_eq!(app.selected_path, PathBuf::from("/root/b"));
+    }
+
+    #[test]
+    fn ensure_valid_selection_prefers_parent() {
+        let mut app = sample_app();
+        if let Some(children) = app.root.children.as_mut() {
+            children[0].expanded = false;
+        }
+        app.selected_path = PathBuf::from("/root/a/ab");
+        app.ensure_valid_selection();
+        assert_eq!(app.selected_path, PathBuf::from("/root/a"));
+    }
+
+    #[test]
+    fn on_left_moves_to_parent_and_collapses() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a");
+        app.on_left();
+        assert_eq!(app.selected_path, PathBuf::from("/root"));
+        let a_node = App::find_node(&app.root, Path::new("/root/a")).unwrap();
+        assert!(!a_node.expanded);
+    }
+
+    #[test]
+    fn expand_to_path_expands_nested_dirs() {
+        let temp = TempDir::new("cdtree_expand");
+        let root = temp.path.join("root");
+        let level1 = root.join("level1");
+        let level2 = level1.join("level2");
+        create_dir(&level2);
+
+        let mut root_node = FileNode::new(root.clone(), true);
+        root_node.load_children(true, true).unwrap();
+        root_node.expanded = true;
+
+        let mut app = App {
+            root: root_node,
+            selected_path: root.clone(),
+            startup_path: root.clone(),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+        };
+
+        app.expand_to_path(level2.as_path());
+
+        let level1_node = App::find_node(&app.root, level1.as_path()).unwrap();
+        assert!(level1_node.expanded);
+        assert!(level1_node.children.is_some());
+
+        let level2_node = App::find_node(&app.root, level2.as_path()).unwrap();
+        assert!(level2_node.expanded);
+    }
+
+    #[test]
+    fn app_new_selects_current_dir_when_inside_home() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_app_new_in");
+        let home = temp.path.join("home");
+        let current = home.join("projects").join("alpha");
+        create_dir(&current);
+
+        let canonical_home = home.canonicalize().unwrap();
+        let canonical_current = current.canonicalize().unwrap();
+
+        let _cwd_guard = CurrentDirGuard::set(&canonical_current);
+        let _home_guard = EnvGuard::set("HOME", canonical_home.to_str().unwrap());
+
+        let app = App::new().unwrap();
+
+        assert_eq!(app.root.path, canonical_home);
+        assert!(app.root.expanded);
+        assert_eq!(app.selected_path, canonical_current);
+        assert_eq!(app.startup_path, canonical_current);
+
+        let level1 = canonical_home.join("projects");
+        let level1_node = App::find_node(&app.root, level1.as_path()).unwrap();
+        assert!(level1_node.expanded);
+        let leaf_node = App::find_node(&app.root, canonical_current.as_path()).unwrap();
+        assert!(leaf_node.expanded);
+    }
+
+    #[test]
+    fn app_new_selects_home_when_current_dir_outside_home() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_app_new_out");
+        let home = temp.path.join("home");
+        let outside = temp.path.join("outside");
+        create_dir(&home);
+        create_dir(&outside);
+
+        let canonical_home = home.canonicalize().unwrap();
+        let canonical_outside = outside.canonicalize().unwrap();
+
+        let _cwd_guard = CurrentDirGuard::set(&canonical_outside);
+        let _home_guard = EnvGuard::set("HOME", canonical_home.to_str().unwrap());
+
+        let app = App::new().unwrap();
+
+        assert_eq!(app.root.path, canonical_home);
+        assert_eq!(app.selected_path, canonical_home);
+        assert_eq!(app.startup_path, canonical_outside);
+    }
+}

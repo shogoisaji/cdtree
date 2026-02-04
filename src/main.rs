@@ -10,6 +10,8 @@ use anyhow::Result;
 mod app;
 mod ui;
 mod shell;
+#[cfg(test)]
+mod test_support;
 
 use app::App;
 use ui::TreeWidget;
