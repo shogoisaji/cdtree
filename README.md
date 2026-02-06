@@ -2,6 +2,15 @@
   <img src="assets/cdtree_logo.png" alt="cdtree logo" width="500">
 </p>
 
+<p align="center">
+  <a href="https://github.com/shogoisaji/cdtree/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/shogoisaji/cdtree/release.yml?label=release" alt="Release Status">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/github/license/shogoisaji/cdtree" alt="License">
+  </a>
+</p>
+
 # cdtree
 
 A simple CLI tool to navigate directories with a tree view, similar to `tree` but interactive. It allows you to select a directory and change to it in your shell.
@@ -31,6 +40,8 @@ brew install shogoisaji/cdtree/cdtree
 Requires Rust and Cargo.
 
 ```bash
+git clone https://github.com/shogoisaji/cdtree.git
+cd cdtree
 cargo install --path .
 ```
 
@@ -70,3 +81,7 @@ cdtree
 ## Configuration
 
 The color theme is saved automatically to `~/.config/cdtree/config.json`.
+
+## License
+
+[MIT](LICENSE)
