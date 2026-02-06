@@ -8,6 +8,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use anyhow::Result;
 
 mod app;
+mod config;
 mod ui;
 mod shell;
 #[cfg(test)]
@@ -87,6 +88,18 @@ where
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
                     KeyCode::Left | KeyCode::Char('h') => app.on_left(),
+                    KeyCode::Char('t') => {
+                        let now = std::time::Instant::now();
+                        if let Some(last) = app.last_theme_change {
+                            if now.duration_since(last).as_millis() < 200 {
+                                app.reset_theme_default();
+                                app.last_theme_change = Some(now);
+                                continue;
+                            }
+                        }
+                        app.change_theme_random();
+                        app.last_theme_change = Some(now);
+                    }
                     KeyCode::Enter => {
                         if app.is_selected_dir() {
                             let path = app.selected_path.to_string_lossy().to_string();

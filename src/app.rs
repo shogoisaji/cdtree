@@ -3,6 +3,9 @@ use std::fs;
 use std::cmp::Ordering;
 use std::io;
 use ratatui::widgets::ListState;
+use crate::config::{Config, Theme, RgbColor};
+use rand::Rng;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct FileNode {
@@ -79,6 +82,9 @@ pub struct App {
     pub show_files: bool,
     pub show_hidden: bool,
     pub list_state: ListState,
+    pub config: Config,
+    pub current_theme: Theme,
+    pub last_theme_change: Option<Instant>,
 }
 
 impl App {
@@ -105,7 +111,13 @@ impl App {
             show_files: false,
             show_hidden: false,
             list_state: ListState::default(),
+            config: Config::load().unwrap_or_default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
         };
+
+        // Set initial theme from config
+        app.current_theme = app.config.theme.clone();
 
         // Expand tree to current directory
         app.expand_to_path(&current_dir);
@@ -377,6 +389,36 @@ impl App {
              }
          }
     }
+
+
+    pub fn change_theme_random(&mut self) {
+        let mut rng = rand::rng();
+        let new_theme = Theme {
+            border_fg: Self::random_color(&mut rng),
+            border_style: Self::random_color(&mut rng),
+            border_style_soft: Self::random_color(&mut rng),
+            key_highlight: Self::random_color(&mut rng),
+            branch_color: Self::random_color(&mut rng),
+        };
+        self.current_theme = new_theme.clone();
+        self.config.theme = new_theme;
+        let _ = self.config.save();
+    }
+
+    pub fn reset_theme_default(&mut self) {
+        let default = Theme::default();
+        self.current_theme = default.clone();
+        self.config.theme = default;
+        let _ = self.config.save();
+    }
+
+    fn random_color(rng: &mut impl Rng) -> RgbColor {
+        RgbColor {
+            r: rng.random(),
+            g: rng.random(),
+            b: rng.random(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +479,9 @@ mod tests {
             show_files: true,
             show_hidden: true,
             list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
         }
     }
 
@@ -537,6 +582,9 @@ mod tests {
             show_files: true,
             show_hidden: true,
             list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
         };
 
         app.expand_to_path(level2.as_path());
