@@ -63,5 +63,10 @@ cdtree
 - **Left**: Collapse directory or go to parent.
 - **Enter**: Change to the selected directory (only when a directory is selected).
 - **f**: Toggle file visibility.
-- **h**: Toggle hidden file visibility.
+- **a**: Toggle hidden file visibility.
+- **t**: (Tap) Change color theme randomly. (Double-tap) Reset theme.
 - **q / Esc**: Quit.
+
+## Configuration
+
+The color theme is saved automatically to `~/.config/cdtree/config.json`.

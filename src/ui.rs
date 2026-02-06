@@ -7,10 +7,6 @@ use ratatui::{
 };
 use crate::app::{App, FileNode};
 
-const LIME: Color = Color::Rgb(120, 230, 80);
-const LIME_SOFT: Color = Color::Rgb(90, 190, 70);
-const ORANGE: Color = Color::Rgb(255, 160, 0);
-const BRANCH_BLUE: Color = Color::Rgb(202, 93, 42);
 const LEFT_PAD: &str = "  ";
 
 pub struct TreeWidget<'a> {
@@ -36,7 +32,7 @@ impl<'a> Widget for TreeWidget<'a> {
 
                 let spans = vec![
                     Span::raw(LEFT_PAD),
-                    Span::styled(prefix, Style::default().fg(BRANCH_BLUE)),
+                    Span::styled(prefix, Style::default().fg(self.app.current_theme.branch_color.into())),
                     Span::styled(display_name, name_style),
                 ];
 
@@ -48,7 +44,7 @@ impl<'a> Widget for TreeWidget<'a> {
         let outer_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(LIME));
+            .border_style(Style::default().fg(self.app.current_theme.border_style.into()));
         let content_area = outer_block.inner(area);
         outer_block.render(area, buf);
 
@@ -61,34 +57,34 @@ impl<'a> Widget for TreeWidget<'a> {
         StatefulWidget::render(list, chunks[0], buf, &mut self.app.list_state);
 
         let files_style = if self.app.show_files {
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)
+            Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(LIME_SOFT)
+            Style::default().fg(self.app.current_theme.border_style_soft.into())
         };
         let hidden_style = if self.app.show_hidden {
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)
+            Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(LIME_SOFT)
+            Style::default().fg(self.app.current_theme.border_style_soft.into())
         };
 
         let guide_line = Line::from(vec![
             Span::raw(LEFT_PAD),
-            Span::styled("↑/↓/→/←", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
-            Span::styled(" Move  ", Style::default().fg(LIME_SOFT)),
-            Span::styled("f", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled("↑/↓/→/←", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled(" Move  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
+            Span::styled("f", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
             Span::styled(" Files  ", files_style),
-            Span::styled("a", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
+            Span::styled("a", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
             Span::styled(" All  ", hidden_style),
-            Span::styled("Enter", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
-            Span::styled(" Select  ", Style::default().fg(LIME_SOFT)),
-            Span::styled("q/Esc", Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
-            Span::styled(" Quit", Style::default().fg(LIME_SOFT)),
+            Span::styled("Enter", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled(" Select  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
+            Span::styled("q/Esc", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled(" Quit", Style::default().fg(self.app.current_theme.border_style_soft.into())),
         ]);
 
         let guide_block = Block::default()
             .borders(Borders::TOP)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(LIME));
+            .border_style(Style::default().fg(self.app.current_theme.border_style.into()));
         let guide_area = guide_block.inner(chunks[1]);
         guide_block.render(chunks[1], buf);
 
@@ -110,11 +106,11 @@ impl<'a> TreeWidget<'a> {
 
     fn name_style(app: &App, node: &FileNode, is_selected: bool) -> Style {
         if is_selected {
-            Style::default().bg(LIME).fg(Color::Black).add_modifier(Modifier::BOLD)
+            Style::default().bg(app.current_theme.border_fg.into()).fg(Color::Black).add_modifier(Modifier::BOLD)
         } else if node.path == app.startup_path {
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)
+            Style::default().fg(app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
         } else if node.path == app.root.path {
-            Style::default().fg(LIME).add_modifier(Modifier::BOLD)
+            Style::default().fg(app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)
         } else if node.is_dir {
             Style::default().fg(Color::White)
         } else {
