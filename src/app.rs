@@ -85,6 +85,10 @@ pub struct App {
     pub config: Config,
     pub current_theme: Theme,
     pub last_theme_change: Option<Instant>,
+    pub input_mode: bool,
+    pub input_buffer: String,
+    pub status_message: Option<(String, bool)>, // (message, is_error)
+    pub status_time: Option<Instant>,
 }
 
 impl App {
@@ -114,6 +118,10 @@ impl App {
             config: Config::load().unwrap_or_default(),
             current_theme: Theme::default(),
             last_theme_change: None,
+            input_mode: false,
+            input_buffer: String::new(),
+            status_message: None,
+            status_time: None,
         };
 
         // Set initial theme from config
@@ -419,6 +427,43 @@ impl App {
             b: rng.random(),
         }
     }
+
+    pub fn create_new_directory(&mut self) {
+        if self.input_buffer.trim().is_empty() {
+            return;
+        }
+
+        // Determine parent directory
+        let parent = if self.is_selected_dir() {
+            self.selected_path.clone()
+        } else {
+            self.selected_path.parent().unwrap_or(&self.root.path).to_path_buf()
+        };
+
+        let new_path = parent.join(&self.input_buffer);
+
+        match fs::create_dir(&new_path) {
+            Ok(_) => {
+                self.status_message = Some((format!("Created directory: {}", self.input_buffer), false));
+                self.status_time = Some(Instant::now());
+                self.reload_all();
+
+                // Expand parent to show new dir if necessary
+                self.expand_to_path(&new_path);
+
+                // Select the new directory
+                self.selected_path = new_path;
+                self.ensure_valid_selection();
+                self.update_list_state();
+            }
+            Err(e) => {
+                self.status_message = Some((format!("Error: {}", e), true));
+                self.status_time = Some(Instant::now());
+            }
+        }
+        self.input_buffer.clear();
+        self.input_mode = false;
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +527,10 @@ mod tests {
             config: Config::default(),
             current_theme: Theme::default(),
             last_theme_change: None,
+            input_mode: false,
+            input_buffer: String::new(),
+            status_message: None,
+            status_time: None,
         }
     }
 
@@ -585,6 +634,10 @@ mod tests {
             config: Config::default(),
             current_theme: Theme::default(),
             last_theme_change: None,
+            input_mode: false,
+            input_buffer: String::new(),
+            status_message: None,
+            status_time: None,
         };
 
         app.expand_to_path(level2.as_path());
@@ -623,6 +676,49 @@ mod tests {
         assert!(level1_node.expanded);
         let leaf_node = App::find_node(&app.root, canonical_current.as_path()).unwrap();
         assert!(leaf_node.expanded);
+    }
+
+    #[test]
+    fn create_new_directory_creates_dir_and_updates() {
+        let temp = TempDir::new("cdtree_create_dir");
+        let root = temp.path.join("root");
+        create_dir(&root);
+        let existing = root.join("existing");
+        create_dir(&existing);
+
+        let mut app = App {
+            root: FileNode::new(root.clone(), true),
+            selected_path: existing.clone(),
+            startup_path: root.clone(),
+            show_files: false,
+            show_hidden: false,
+            list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
+            input_mode: true,
+            input_buffer: "new_dir".to_string(),
+            status_message: None,
+            status_time: None,
+        };
+        app.root.load_children(false, false).unwrap();
+        app.root.expanded = true;
+
+        // Select 'existing' directory
+        app.selected_path = existing.clone();
+
+        app.create_new_directory();
+
+        let new_dir_path = existing.join("new_dir");
+        assert!(new_dir_path.exists());
+        assert!(new_dir_path.is_dir());
+
+        // Check if selected path is updated
+        assert_eq!(app.selected_path, new_dir_path);
+
+        // Check if status message is set
+        assert!(app.status_message.is_some());
+        assert!(!app.status_message.as_ref().unwrap().1); // Not an error
     }
 
     #[test]

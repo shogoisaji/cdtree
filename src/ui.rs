@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, StatefulWidget, Widget, Wrap},
 };
 use crate::app::{App, FileNode};
 
@@ -56,6 +56,47 @@ impl<'a> Widget for TreeWidget<'a> {
         let list = List::new(items);
         StatefulWidget::render(list, chunks[0], buf, &mut self.app.list_state);
 
+        // Status message overlay
+        if let Some((msg, is_error)) = &self.app.status_message {
+            if let Some(time) = self.app.status_time {
+                if time.elapsed().as_secs() < 3 {
+                    let color = if *is_error { Color::Red } else { Color::Green };
+                    let status_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(color));
+                    let area = centered_rect(60, 20, area);
+                    let area = Rect::new(area.x, area.y + area.height / 2 - 1, area.width, 3);
+
+                    let paragraph = Paragraph::new(Line::from(vec![
+                        Span::styled(msg, Style::default().fg(color).add_modifier(Modifier::BOLD))
+                    ]))
+                    .block(status_block)
+                    .wrap(Wrap { trim: true });
+
+                    Clear.render(area, buf);
+                    paragraph.render(area, buf);
+                }
+            }
+        }
+
+        // Input popup
+        if self.app.input_mode {
+            let area = centered_rect(50, 20, area);
+            let area = Rect::new(area.x, area.y + area.height / 2 - 1, area.width, 3);
+
+            let input_block = Block::default()
+                .title(" New Directory Name ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.app.current_theme.key_highlight.into()));
+
+            let input_text = Paragraph::new(self.app.input_buffer.as_str())
+                .style(Style::default().fg(Color::White))
+                .block(input_block);
+
+            Clear.render(area, buf);
+            input_text.render(area, buf);
+        }
+
         let files_style = if self.app.show_files {
             Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
         } else {
@@ -75,6 +116,8 @@ impl<'a> Widget for TreeWidget<'a> {
             Span::styled(" Files  ", files_style),
             Span::styled("a", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
             Span::styled(" All  ", hidden_style),
+            Span::styled("n", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled(" New Dir  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
             Span::styled("Enter", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
             Span::styled(" Select  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
             Span::styled("q/Esc", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
@@ -117,4 +160,24 @@ impl<'a> TreeWidget<'a> {
             Style::default().fg(Color::DarkGray)
         }
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

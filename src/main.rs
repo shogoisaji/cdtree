@@ -80,33 +80,54 @@ where
 
         if event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
-                    KeyCode::Char('f') => app.toggle_show_files(),
-                    KeyCode::Char('a') => app.toggle_show_hidden(),
-                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-                    KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
-                    KeyCode::Left | KeyCode::Char('h') => app.on_left(),
-                    KeyCode::Char('t') => {
-                        let now = std::time::Instant::now();
-                        if let Some(last) = app.last_theme_change {
-                            if now.duration_since(last).as_millis() < 200 {
-                                app.reset_theme_default();
-                                app.last_theme_change = Some(now);
-                                continue;
+                if app.input_mode {
+                    match key.code {
+                        KeyCode::Enter => app.create_new_directory(),
+                        KeyCode::Esc => {
+                            app.input_mode = false;
+                            app.input_buffer.clear();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input_buffer.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input_buffer.pop();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                        KeyCode::Char('f') => app.toggle_show_files(),
+                        KeyCode::Char('a') => app.toggle_show_hidden(),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                        KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
+                        KeyCode::Left | KeyCode::Char('h') => app.on_left(),
+                        KeyCode::Char('n') => {
+                            app.input_mode = true;
+                            app.input_buffer.clear();
+                        }
+                        KeyCode::Char('t') => {
+                            let now = std::time::Instant::now();
+                            if let Some(last) = app.last_theme_change {
+                                if now.duration_since(last).as_millis() < 200 {
+                                    app.reset_theme_default();
+                                    app.last_theme_change = Some(now);
+                                    continue;
+                                }
+                            }
+                            app.change_theme_random();
+                            app.last_theme_change = Some(now);
+                        }
+                        KeyCode::Enter => {
+                            if app.is_selected_dir() {
+                                let path = app.selected_path.to_string_lossy().to_string();
+                                return Ok(Some(path));
                             }
                         }
-                        app.change_theme_random();
-                        app.last_theme_change = Some(now);
+                        _ => {}
                     }
-                    KeyCode::Enter => {
-                        if app.is_selected_dir() {
-                            let path = app.selected_path.to_string_lossy().to_string();
-                            return Ok(Some(path));
-                        }
-                    }
-                     _ => {}
                 }
             }
         }
