@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version {
-        println!("cdtree {}", env!("CARGO_PKG_VERSION"));
+        eprintln!("cdtree {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
