@@ -28,12 +28,17 @@ struct Cli {
     setup: bool,
 
     /// Print version information
-    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
-    version: Option<bool>,
+    #[arg(short = 'v', long = "version")]
+    version: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.version {
+        println!("cdtree {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     if cli.setup {
         setup_shell_integration()?;
