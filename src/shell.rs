@@ -46,6 +46,13 @@ pub fn setup_shell_integration() -> Result<()> {
     let shell_func = r#"
 # cdtree integration
 function cdtree() {
+    # Handle help and version flags directly without cd
+    case "$1" in
+        -h|--help|-v|--version|-s|--setup)
+            command cdtree "$@"
+            return
+            ;;
+    esac
     local target
     target=$(command cdtree "$@") && [ -n "$target" ] && cd "$target"
 }
