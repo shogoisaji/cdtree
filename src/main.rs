@@ -6,6 +6,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use anyhow::Result;
+use clap::Parser;
 
 mod app;
 mod config;
@@ -18,10 +19,23 @@ use app::App;
 use ui::TreeWidget;
 use shell::{has_shell_integration, setup_shell_integration};
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+#[command(disable_version_flag = true)]
+struct Cli {
+    /// Setup shell integration
+    #[arg(short, long)]
+    setup: bool,
+
+    /// Print version information
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
+}
+
 fn main() -> Result<()> {
-    // Check for arguments
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|arg| arg == "--setup") {
+    let cli = Cli::parse();
+
+    if cli.setup {
         setup_shell_integration()?;
         return Ok(());
     }
@@ -92,9 +106,9 @@ where
                         let now = std::time::Instant::now();
                         if let Some(last) = app.last_theme_change {
                             if now.duration_since(last).as_millis() < 200 {
-                                app.reset_theme_default();
-                                app.last_theme_change = Some(now);
-                                continue;
+                                 app.reset_theme_default();
+                                 app.last_theme_change = Some(now);
+                                 continue;
                             }
                         }
                         app.change_theme_random();
@@ -110,5 +124,25 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn verify_cli() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn verify_setup_arg() {
+        let cli = Cli::try_parse_from(&["cdtree", "--setup"]).unwrap();
+        assert!(cli.setup);
+
+        let cli = Cli::try_parse_from(&["cdtree", "-s"]).unwrap();
+        assert!(cli.setup);
     }
 }
