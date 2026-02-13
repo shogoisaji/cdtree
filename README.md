@@ -32,7 +32,8 @@ A simple CLI tool to navigate directories with a tree view, similar to `tree` bu
 ### Homebrew (macOS)
 
 ```bash
-brew install shogoisaji/cdtree/cdtree
+brew tap shogoisaji/cdtree
+brew install cdtree
 ```
 
 ### Cargo
