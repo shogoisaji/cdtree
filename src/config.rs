@@ -47,12 +47,18 @@ impl Default for Theme {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub theme: Theme,
+    #[serde(default)]
+    pub show_files: bool,
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             theme: Theme::default(),
+            show_files: false,
+            show_hidden: false,
         }
     }
 }
@@ -84,3 +90,5 @@ impl Config {
         Path::new(&home).join(".config").join("cdtree").join("config.json")
     }
 }
+
+
