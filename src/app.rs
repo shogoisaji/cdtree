@@ -104,14 +104,18 @@ impl App {
             home_dir.clone()
         };
 
+        let config = Config::load().unwrap_or_default();
+        let show_files = config.show_files;
+        let show_hidden = config.show_hidden;
+
         let mut app = Self {
             root,
             selected_path,
             startup_path: current_dir.clone(),
-            show_files: false,
-            show_hidden: false,
+            show_files,
+            show_hidden,
             list_state: ListState::default(),
-            config: Config::load().unwrap_or_default(),
+            config,
             current_theme: Theme::default(),
             last_theme_change: None,
         };
@@ -329,11 +333,15 @@ impl App {
 
     pub fn toggle_show_files(&mut self) {
         self.show_files = !self.show_files;
+        self.config.show_files = self.show_files;
+        let _ = self.config.save();
         self.refresh_after_toggle();
     }
     
     pub fn toggle_show_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
+        self.config.show_hidden = self.show_hidden;
+        let _ = self.config.save();
         self.refresh_after_toggle();
     }
 
