@@ -1,4 +1,5 @@
 use std::io;
+use std::process::Command;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -7,6 +8,36 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use anyhow::Result;
 use clap::Parser;
+
+// Command constants
+#[cfg(target_os = "macos")]
+const OPEN_COMMAND: &str = "open";
+#[cfg(target_os = "linux")]
+const OPEN_COMMAND: &str = "xdg-open";
+#[cfg(target_os = "windows")]
+const OPEN_COMMAND: &str = "explorer";
+
+const CODE_COMMAND: &str = "code";
+
+fn execute_mode_action(path: &str, mode: app::AppMode) {
+    match mode {
+        app::AppMode::Cd => println!("{}", path),
+        app::AppMode::Open => {
+            if let Err(e) = Command::new(OPEN_COMMAND).arg(path).spawn() {
+                eprintln!("Failed to open: {}", e);
+            } else {
+                println!("Opened: {}", path);
+            }
+        }
+        app::AppMode::Code => {
+            if let Err(e) = Command::new(CODE_COMMAND).arg(path).spawn() {
+                eprintln!("Failed to open in VS Code: {}", e);
+            } else {
+                println!("Opened in VS Code: {}", path);
+            }
+        }
+    }
+}
 
 mod app;
 mod config;
@@ -72,7 +103,9 @@ fn main() -> Result<()> {
     terminal.show_cursor()?;
 
     match res {
-        Ok(Some(path)) => println!("{}", path),
+        Ok(Some((path, mode))) => {
+            execute_mode_action(&path, mode);
+        }
         Err(err) => eprintln!("{:?}", err),
         _ => {}
     }
@@ -87,7 +120,7 @@ fn print_install_required() {
     eprintln!("\nAfter setting it up, reload your shell.");
 }
 
-fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<Option<String>> 
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<Option<(String, app::AppMode)>> 
 where
     <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -101,6 +134,7 @@ where
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Tab => app.mode.toggle(),
                     KeyCode::Char('f') => app.toggle_show_files(),
                     KeyCode::Char('a') => app.toggle_show_hidden(),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
@@ -122,7 +156,8 @@ where
                     KeyCode::Enter => {
                         if app.is_selected_dir() {
                             let path = app.selected_path.to_string_lossy().to_string();
-                            return Ok(Some(path));
+                            let mode = app.mode;
+                            return Ok(Some((path, mode)));
                         }
                     }
                      _ => {}
