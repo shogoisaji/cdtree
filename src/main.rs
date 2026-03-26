@@ -10,7 +10,13 @@ use anyhow::Result;
 use clap::Parser;
 
 // Command constants
+#[cfg(target_os = "macos")]
 const OPEN_COMMAND: &str = "open";
+#[cfg(target_os = "linux")]
+const OPEN_COMMAND: &str = "xdg-open";
+#[cfg(target_os = "windows")]
+const OPEN_COMMAND: &str = "explorer";
+
 const CODE_COMMAND: &str = "code";
 
 fn execute_mode_action(path: &str, mode: app::AppMode) {
