@@ -54,7 +54,7 @@ function cdtree() {
             ;;
     esac
     local target
-    target=$(command cdtree "$@") && [ -n "$target" ] && cd "$target"
+    target=$(command cdtree "$@") && [ -n "$target" ] && eval "$target"
 }
 "#;
     std::fs::write(&launcher_path, shell_func)?;

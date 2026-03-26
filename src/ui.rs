@@ -30,11 +30,18 @@ impl<'a> Widget for TreeWidget<'a> {
                 let name_style = Self::name_style(self.app, node, is_selected);
                 let prefix = prefix.clone();
 
-                let spans = vec![
+                let mut spans = vec![
                     Span::raw(LEFT_PAD),
                     Span::styled(prefix, Style::default().fg(self.app.current_theme.branch_color.into())),
                     Span::styled(display_name, name_style),
                 ];
+
+                // Add mode indicator for selected item
+                if is_selected && node.is_dir {
+                    let mode_style = Style::default()
+                        .fg(self.app.current_theme.border_fg.into());
+                    spans.push(Span::styled(self.app.mode.suffix(), mode_style));
+                }
 
                 items.push(ListItem::new(Line::from(spans)));
             }
@@ -44,7 +51,10 @@ impl<'a> Widget for TreeWidget<'a> {
         let outer_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
-            .border_style(Style::default().fg(self.app.current_theme.border_style.into()));
+            .border_style(Style::default().fg(self.app.current_theme.border_style.into()))
+            .title(Line::from(vec![
+                Span::styled(" CDTREE ", Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)),
+            ]));
         let content_area = outer_block.inner(area);
         outer_block.render(area, buf);
 
@@ -69,6 +79,8 @@ impl<'a> Widget for TreeWidget<'a> {
 
         let guide_line = Line::from(vec![
             Span::raw(LEFT_PAD),
+            Span::styled("Tab", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled(" Mode  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
             Span::styled("↑/↓/→/←", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
             Span::styled(" Move  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
             Span::styled("f", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),

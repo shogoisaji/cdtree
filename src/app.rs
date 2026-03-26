@@ -7,6 +7,31 @@ use crate::config::{Config, Theme, RgbColor};
 use rand::Rng;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    Cd,
+    Open,
+    Code,
+}
+
+impl AppMode {
+    pub fn suffix(&self) -> &str {
+        match self {
+            AppMode::Cd => "_CD",
+            AppMode::Open => "_OPEN",
+            AppMode::Code => "_CODE",
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        *self = match self {
+            AppMode::Cd => AppMode::Open,
+            AppMode::Open => AppMode::Code,
+            AppMode::Code => AppMode::Cd,
+        };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileNode {
     pub path: PathBuf,
@@ -85,6 +110,7 @@ pub struct App {
     pub config: Config,
     pub current_theme: Theme,
     pub last_theme_change: Option<Instant>,
+    pub mode: AppMode,
 }
 
 impl App {
@@ -118,6 +144,7 @@ impl App {
             config,
             current_theme: Theme::default(),
             last_theme_change: None,
+            mode: AppMode::Cd,
         };
 
         // Set initial theme from config
@@ -490,6 +517,7 @@ mod tests {
             config: Config::default(),
             current_theme: Theme::default(),
             last_theme_change: None,
+            mode: AppMode::Cd,
         }
     }
 
@@ -593,6 +621,7 @@ mod tests {
             config: Config::default(),
             current_theme: Theme::default(),
             last_theme_change: None,
+            mode: AppMode::Cd,
         };
 
         app.expand_to_path(level2.as_path());
