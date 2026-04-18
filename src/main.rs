@@ -43,6 +43,7 @@ mod app;
 mod config;
 mod ui;
 mod shell;
+mod history;
 #[cfg(test)]
 mod test_support;
 
@@ -132,35 +133,57 @@ where
 
         if event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
-                    KeyCode::Tab => app.mode.toggle(),
-                    KeyCode::Char('f') => app.toggle_show_files(),
-                    KeyCode::Char('a') => app.toggle_show_hidden(),
-                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-                    KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
-                    KeyCode::Left | KeyCode::Char('h') => app.on_left(),
-                    KeyCode::Char('t') => {
-                        let now = std::time::Instant::now();
-                        if let Some(last) = app.last_theme_change {
-                            if now.duration_since(last).as_millis() < 200 {
-                                 app.reset_theme_default();
-                                 app.last_theme_change = Some(now);
-                                 continue;
+                if app.history_mode {
+                    match key.code {
+                        KeyCode::Char(' ') | KeyCode::Esc => {
+                            app.toggle_history_mode();
+                        }
+                        KeyCode::Char('q') => return Ok(None),
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.move_history_selection(-1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.move_history_selection(1);
+                        }
+                        KeyCode::Enter => {
+                            if let Some(result) = app.select_from_history() {
+                                return Ok(Some(result));
                             }
                         }
-                        app.change_theme_random();
-                        app.last_theme_change = Some(now);
+                        _ => {}
                     }
-                    KeyCode::Enter => {
-                        if app.is_selected_dir() {
-                            let path = app.selected_path.to_string_lossy().to_string();
-                            let mode = app.mode;
-                            return Ok(Some((path, mode)));
+                } else {
+                    match key.code {
+                        KeyCode::Char(' ') => {
+                            app.toggle_history_mode();
                         }
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                        KeyCode::Tab => app.mode.toggle(),
+                        KeyCode::Char('f') => app.toggle_show_files(),
+                        KeyCode::Char('a') => app.toggle_show_hidden(),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                        KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
+                        KeyCode::Left | KeyCode::Char('h') => app.on_left(),
+                        KeyCode::Char('t') => {
+                            let now = std::time::Instant::now();
+                            if let Some(last) = app.last_theme_change {
+                                if now.duration_since(last).as_millis() < 200 {
+                                     app.reset_theme_default();
+                                     app.last_theme_change = Some(now);
+                                     continue;
+                                }
+                            }
+                            app.change_theme_random();
+                            app.last_theme_change = Some(now);
+                        }
+                        KeyCode::Enter => {
+                            if let Some(result) = app.record_and_get_path() {
+                                return Ok(Some(result));
+                            }
+                        }
+                         _ => {}
                     }
-                     _ => {}
                 }
             }
         }

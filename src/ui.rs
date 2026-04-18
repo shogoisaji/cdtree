@@ -21,6 +21,70 @@ impl<'a> TreeWidget<'a> {
 
 impl<'a> Widget for TreeWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let title = if self.app.history_mode {
+            Line::from(vec![
+                Span::styled(" CDTREE ", Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)),
+                Span::styled("HISTORY", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(" CDTREE ", Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)),
+            ])
+        };
+
+        let outer_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(self.app.current_theme.border_style.into()))
+            .title(title);
+        let content_area = outer_block.inner(area);
+        outer_block.render(area, buf);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(2)])
+            .split(content_area);
+
+        if self.app.history_mode {
+            self.render_history(chunks[0], chunks[1], buf);
+        } else {
+            self.render_tree(chunks[0], chunks[1], buf);
+        }
+    }
+}
+
+impl<'a> TreeWidget<'a> {
+    fn display_name(node: &FileNode) -> String {
+        let name = node.name();
+        if name.is_empty() {
+            node.path.display().to_string()
+        } else {
+            name
+        }
+    }
+
+    fn selected_style(app: &App) -> Style {
+        Style::default().bg(app.current_theme.border_fg.into()).fg(Color::Black).add_modifier(Modifier::BOLD)
+    }
+
+    fn name_style(app: &App, node: &FileNode, is_selected: bool) -> Style {
+        if is_selected {
+            Self::selected_style(app)
+        } else if node.path == app.startup_path {
+            Style::default().fg(app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
+        } else if node.path == app.root.path {
+            Style::default().fg(app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)
+        } else if node.is_dir {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    }
+
+    fn render_tree(self, tree_area: Rect, guide_area: Rect, buf: &mut Buffer) {
+        let key_style = Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().fg(self.app.current_theme.border_style_soft.into());
+
         let items = {
             let visible_nodes = self.app.get_visible_nodes();
             let mut items = Vec::with_capacity(visible_nodes.len());
@@ -36,7 +100,6 @@ impl<'a> Widget for TreeWidget<'a> {
                     Span::styled(display_name, name_style),
                 ];
 
-                // Add mode indicator for selected item
                 if is_selected && node.is_dir {
                     let mode_style = Style::default()
                         .fg(self.app.current_theme.border_fg.into());
@@ -48,23 +111,8 @@ impl<'a> Widget for TreeWidget<'a> {
             items
         };
 
-        let outer_block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(self.app.current_theme.border_style.into()))
-            .title(Line::from(vec![
-                Span::styled(" CDTREE ", Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)),
-            ]));
-        let content_area = outer_block.inner(area);
-        outer_block.render(area, buf);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(2)])
-            .split(content_area);
-
         let list = List::new(items);
-        StatefulWidget::render(list, chunks[0], buf, &mut self.app.list_state);
+        StatefulWidget::render(list, tree_area, buf, &mut self.app.list_state);
 
         let files_style = if self.app.show_files {
             Style::default().fg(self.app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
@@ -79,54 +127,95 @@ impl<'a> Widget for TreeWidget<'a> {
 
         let guide_line = Line::from(vec![
             Span::raw(LEFT_PAD),
-            Span::styled("Tab", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
-            Span::styled(" Mode  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
-            Span::styled("↑/↓/→/←", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
-            Span::styled(" Move  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
-            Span::styled("f", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled("Space", key_style),
+            Span::styled(" History  ", label_style),
+            Span::styled("Tab", key_style),
+            Span::styled(" Mode  ", label_style),
+            Span::styled("↑/↓/→/←", key_style),
+            Span::styled(" Move  ", label_style),
+            Span::styled("f", key_style),
             Span::styled(" Files  ", files_style),
-            Span::styled("a", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
+            Span::styled("a", key_style),
             Span::styled(" All  ", hidden_style),
-            Span::styled("Enter", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
-            Span::styled(" Select  ", Style::default().fg(self.app.current_theme.border_style_soft.into())),
-            Span::styled("q/Esc", Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)),
-            Span::styled(" Quit", Style::default().fg(self.app.current_theme.border_style_soft.into())),
+            Span::styled("Enter", key_style),
+            Span::styled(" Select  ", label_style),
+            Span::styled("q/Esc", key_style),
+            Span::styled(" Quit", label_style),
         ]);
 
+        self.render_guide(guide_area, guide_line, buf);
+    }
+
+    fn render_history(self, list_area: Rect, guide_area: Rect, buf: &mut Buffer) {
+        let key_style = Style::default().fg(self.app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().fg(self.app.current_theme.border_style_soft.into());
+
+        if self.app.history.entries.is_empty() {
+            let empty_msg = Paragraph::new(Line::from(vec![
+                Span::raw(LEFT_PAD),
+                Span::styled(
+                    "No history yet. Navigate directories with Enter to build history.",
+                    label_style,
+                ),
+            ]));
+            empty_msg.render(list_area, buf);
+        } else {
+            let home = &self.app.home_dir;
+            let items: Vec<ListItem> = self.app.history.entries.iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let is_selected = self.app.history_list_state.selected() == Some(i);
+                    let display_path = entry.path.strip_prefix(home)
+                        .map(|p| format!("~/{}", p.display()))
+                        .unwrap_or_else(|_| entry.path.display().to_string());
+
+                    let style = if is_selected {
+                        Self::selected_style(self.app)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+
+                    let line = Line::from(vec![
+                        Span::raw(LEFT_PAD),
+                        Span::styled(
+                            format!("{:>3} ", i + 1),
+                            Style::default().fg(self.app.current_theme.key_highlight.into()),
+                        ),
+                        Span::styled(display_path, style),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect();
+
+            let list = List::new(items);
+            StatefulWidget::render(list, list_area, buf, &mut self.app.history_list_state);
+        }
+
+        let guide_line = Line::from(vec![
+            Span::raw(LEFT_PAD),
+            Span::styled("Space/Esc", key_style),
+            Span::styled(" Back  ", label_style),
+            Span::styled("j/k", key_style),
+            Span::styled(" Navigate  ", label_style),
+            Span::styled("Enter", key_style),
+            Span::styled(" Select  ", label_style),
+            Span::styled("q", key_style),
+            Span::styled(" Quit", label_style),
+        ]);
+
+        self.render_guide(guide_area, guide_line, buf);
+    }
+
+    fn render_guide(self, guide_area_full: Rect, guide_line: Line, buf: &mut Buffer) {
         let guide_block = Block::default()
             .borders(Borders::TOP)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(self.app.current_theme.border_style.into()));
-        let guide_area = guide_block.inner(chunks[1]);
-        guide_block.render(chunks[1], buf);
+        let guide_inner = guide_block.inner(guide_area_full);
+        guide_block.render(guide_area_full, buf);
 
         let guide = Paragraph::new(vec![guide_line])
             .wrap(Wrap { trim: false });
-        guide.render(guide_area, buf);
-    }
-}
-
-impl<'a> TreeWidget<'a> {
-    fn display_name(node: &FileNode) -> String {
-        let name = node.name();
-        if name.is_empty() {
-            node.path.display().to_string()
-        } else {
-            name
-        }
-    }
-
-    fn name_style(app: &App, node: &FileNode, is_selected: bool) -> Style {
-        if is_selected {
-            Style::default().bg(app.current_theme.border_fg.into()).fg(Color::Black).add_modifier(Modifier::BOLD)
-        } else if node.path == app.startup_path {
-            Style::default().fg(app.current_theme.key_highlight.into()).add_modifier(Modifier::BOLD)
-        } else if node.path == app.root.path {
-            Style::default().fg(app.current_theme.border_fg.into()).add_modifier(Modifier::BOLD)
-        } else if node.is_dir {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        }
+        guide.render(guide_inner, buf);
     }
 }
