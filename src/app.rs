@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::io;
 use ratatui::widgets::ListState;
 use crate::config::{Config, Theme, RgbColor};
+use crate::history::History;
 use rand::Rng;
 use std::time::Instant;
 
@@ -111,6 +112,10 @@ pub struct App {
     pub current_theme: Theme,
     pub last_theme_change: Option<Instant>,
     pub mode: AppMode,
+    pub history_mode: bool,
+    pub history: History,
+    pub history_list_state: ListState,
+    pub home_dir: PathBuf,
 }
 
 impl App {
@@ -133,6 +138,7 @@ impl App {
         let config = Config::load().unwrap_or_default();
         let show_files = config.show_files;
         let show_hidden = config.show_hidden;
+        let history = History::load().unwrap_or_default();
 
         let mut app = Self {
             root,
@@ -145,6 +151,10 @@ impl App {
             current_theme: Theme::default(),
             last_theme_change: None,
             mode: AppMode::Cd,
+            history_mode: false,
+            history,
+            history_list_state: ListState::default(),
+            home_dir: home_dir.clone(),
         };
 
         // Set initial theme from config
@@ -518,6 +528,10 @@ mod tests {
             current_theme: Theme::default(),
             last_theme_change: None,
             mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            home_dir: PathBuf::from("/root"),
         }
     }
 
@@ -622,6 +636,10 @@ mod tests {
             current_theme: Theme::default(),
             last_theme_change: None,
             mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            home_dir: root.clone(),
         };
 
         app.expand_to_path(level2.as_path());
@@ -663,6 +681,131 @@ mod tests {
     }
 
     #[test]
+    fn toggle_history_mode_resets_selection() {
+        let mut app = sample_app();
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/a"),
+            timestamp: 1,
+        });
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/b"),
+            timestamp: 2,
+        });
+
+        assert!(!app.history_mode);
+        app.toggle_history_mode();
+        assert!(app.history_mode);
+        assert_eq!(app.history_list_state.selected(), Some(0));
+
+        app.toggle_history_mode();
+        assert!(!app.history_mode);
+    }
+
+    #[test]
+    fn toggle_history_mode_empty_does_not_select() {
+        let mut app = sample_app();
+        assert!(app.history.entries.is_empty());
+        app.toggle_history_mode();
+        assert!(app.history_mode);
+        assert_eq!(app.history_list_state.selected(), None);
+    }
+
+    #[test]
+    fn move_history_selection_clamps() {
+        let mut app = sample_app();
+        for i in 0..3 {
+            app.history.entries.push(crate::history::HistoryEntry {
+                path: PathBuf::from(format!("/root/dir{}", i)),
+                timestamp: i as i64,
+            });
+        }
+        app.history_list_state.select(Some(0));
+
+        app.move_history_selection(-1);
+        assert_eq!(app.history_list_state.selected(), Some(0));
+
+        app.move_history_selection(1);
+        assert_eq!(app.history_list_state.selected(), Some(1));
+
+        app.move_history_selection(10);
+        assert_eq!(app.history_list_state.selected(), Some(2));
+
+        app.move_history_selection(-1);
+        assert_eq!(app.history_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn move_history_selection_empty_is_noop() {
+        let mut app = sample_app();
+        app.move_history_selection(1);
+        assert_eq!(app.history_list_state.selected(), None);
+    }
+
+    #[test]
+    fn selected_history_path_returns_correct() {
+        let mut app = sample_app();
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/a"),
+            timestamp: 1,
+        });
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/b"),
+            timestamp: 2,
+        });
+        app.history_list_state.select(Some(1));
+
+        assert_eq!(app.selected_history_path(), Some(PathBuf::from("/root/b")));
+    }
+
+    #[test]
+    fn select_from_history_returns_cd_mode() {
+        let mut app = sample_app();
+        app.mode = AppMode::Open;
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/a"),
+            timestamp: 1,
+        });
+        app.history_list_state.select(Some(0));
+
+        let result = app.select_from_history();
+        assert_eq!(result, Some(("/root/a".to_string(), AppMode::Cd)));
+        // Should re-record (move to front)
+        assert_eq!(app.history.entries.len(), 1);
+    }
+
+    #[test]
+    fn record_and_get_path_records_in_cd_mode() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a");
+        app.mode = AppMode::Cd;
+
+        let result = app.record_and_get_path();
+        assert_eq!(result, Some(("/root/a".to_string(), AppMode::Cd)));
+        assert_eq!(app.history.entries.len(), 1);
+    }
+
+    #[test]
+    fn record_and_get_path_skips_in_open_mode() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a");
+        app.mode = AppMode::Open;
+
+        let result = app.record_and_get_path();
+        assert!(result.is_some());
+        assert!(app.history.entries.is_empty());
+    }
+
+    #[test]
+    fn record_and_get_path_returns_none_for_file() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a/ab"); // file, not dir
+        app.mode = AppMode::Cd;
+
+        let result = app.record_and_get_path();
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn app_new_selects_home_when_current_dir_outside_home() {
         let _lock = env_lock();
         let temp = TempDir::new("cdtree_app_new_out");
@@ -682,5 +825,48 @@ mod tests {
         assert_eq!(app.root.path, canonical_home);
         assert_eq!(app.selected_path, canonical_home);
         assert_eq!(app.startup_path, canonical_outside);
+    }
+}
+
+// History mode methods
+impl App {
+    pub fn toggle_history_mode(&mut self) {
+        self.history_mode = !self.history_mode;
+        if self.history_mode && !self.history.entries.is_empty() {
+            self.history_list_state.select(Some(0));
+        }
+    }
+
+    pub fn move_history_selection(&mut self, delta: i32) {
+        if self.history.entries.is_empty() {
+            return;
+        }
+        let current = self.history_list_state.selected().unwrap_or(0);
+        let max = (self.history.entries.len() - 1) as i32;
+        let new = (current as i32 + delta).clamp(0, max) as usize;
+        self.history_list_state.select(Some(new));
+    }
+
+    pub fn selected_history_path(&self) -> Option<PathBuf> {
+        let idx = self.history_list_state.selected()?;
+        self.history.entries.get(idx).map(|e| e.path.clone())
+    }
+
+    pub fn select_from_history(&mut self) -> Option<(String, AppMode)> {
+        let path = self.selected_history_path()?;
+        self.history.record(path.clone());
+        let path_str = path.to_string_lossy().to_string();
+        Some((path_str, AppMode::Cd))
+    }
+
+    pub fn record_and_get_path(&mut self) -> Option<(String, AppMode)> {
+        if !self.is_selected_dir() {
+            return None;
+        }
+        if self.mode == AppMode::Cd {
+            self.history.record(self.selected_path.clone());
+        }
+        let path = self.selected_path.to_string_lossy().to_string();
+        Some((path, self.mode))
     }
 }
