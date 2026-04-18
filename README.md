@@ -74,10 +74,17 @@ cdtree
 - **Right**: Expand directory.
 - **Left**: Collapse directory or go to parent.
 - **Enter**: Change to the selected directory (only when a directory is selected).
+- **Space**: Toggle history mode. Select from recently visited directories.
 - **f**: Toggle file visibility.
 - **a**: Toggle hidden file visibility.
 - **t**: (Tap) Change color theme randomly. (Double-tap) Reset theme.
 - **q / Esc**: Quit.
+
+## History Mode
+
+Press **Space** to switch between tree view and history mode. In history mode, directories you've previously navigated to are listed in chronological order. Select an entry with **Up/Down** and press **Enter** to change to it.
+
+History is automatically saved to `~/.config/cdtree/history.json` (up to 100 entries).
 
 ## Configuration
 
