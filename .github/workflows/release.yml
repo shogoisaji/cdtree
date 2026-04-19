@@ -31,3 +31,4 @@ jobs:
         with:
           files: |
             target/release/cdtree-mac.tar.gz
+          generate_release_notes: true
