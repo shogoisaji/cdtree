@@ -161,29 +161,34 @@ impl<'a> TreeWidget<'a> {
             empty_msg.render(list_area, buf);
         } else {
             let home = &self.app.home_dir;
+            let selected_idx = self.app.history_list_state.selected();
+            let mode_suffix = self.app.mode.suffix();
+            let selected_style = Self::selected_style(self.app);
+            let normal_style = Style::default().fg(Color::White);
+            let index_style = Style::default().fg(self.app.current_theme.key_highlight.into());
+            let mode_style = Style::default().fg(self.app.current_theme.border_fg.into());
+
             let items: Vec<ListItem> = self.app.history.entries.iter()
                 .enumerate()
                 .map(|(i, entry)| {
-                    let is_selected = self.app.history_list_state.selected() == Some(i);
+                    let is_selected = selected_idx == Some(i);
                     let display_path = entry.path.strip_prefix(home)
                         .map(|p| format!("~/{}", p.display()))
                         .unwrap_or_else(|_| entry.path.display().to_string());
 
-                    let style = if is_selected {
-                        Self::selected_style(self.app)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
+                    let style = if is_selected { selected_style } else { normal_style };
 
-                    let line = Line::from(vec![
+                    let mut spans = vec![
                         Span::raw(LEFT_PAD),
-                        Span::styled(
-                            format!("{:>3} ", i + 1),
-                            Style::default().fg(self.app.current_theme.key_highlight.into()),
-                        ),
+                        Span::styled(format!("{:>3} ", i + 1), index_style),
                         Span::styled(display_path, style),
-                    ]);
-                    ListItem::new(line)
+                    ];
+
+                    if is_selected {
+                        spans.push(Span::styled(mode_suffix, mode_style));
+                    }
+
+                    ListItem::new(Line::from(spans))
                 })
                 .collect();
 
@@ -195,6 +200,8 @@ impl<'a> TreeWidget<'a> {
             Span::raw(LEFT_PAD),
             Span::styled("Space/Esc", key_style),
             Span::styled(" Back  ", label_style),
+            Span::styled("Tab", key_style),
+            Span::styled(" Mode  ", label_style),
             Span::styled("j/k", key_style),
             Span::styled(" Navigate  ", label_style),
             Span::styled("Enter", key_style),

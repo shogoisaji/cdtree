@@ -133,12 +133,16 @@ where
 
         if event::poll(std::time::Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != event::KeyEventKind::Press {
+                    continue;
+                }
                 if app.history_mode {
                     match key.code {
                         KeyCode::Char(' ') | KeyCode::Esc => {
                             app.toggle_history_mode();
                         }
                         KeyCode::Char('q') => return Ok(None),
+                        KeyCode::Tab => app.mode.toggle(),
                         KeyCode::Up | KeyCode::Char('k') => {
                             app.move_history_selection(-1);
                         }

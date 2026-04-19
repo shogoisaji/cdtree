@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn select_from_history_returns_cd_mode() {
+    fn select_from_history_returns_current_mode() {
         let mut app = sample_app();
         app.mode = AppMode::Open;
         app.history.entries.push(crate::history::HistoryEntry {
@@ -768,9 +768,60 @@ mod tests {
         app.history_list_state.select(Some(0));
 
         let result = app.select_from_history();
-        assert_eq!(result, Some(("/root/a".to_string(), AppMode::Cd)));
-        // Should re-record (move to front)
+        assert_eq!(result, Some(("/root/a".to_string(), AppMode::Open)));
         assert_eq!(app.history.entries.len(), 1);
+    }
+
+    #[test]
+    fn select_from_history_returns_each_mode() {
+        for mode in [AppMode::Cd, AppMode::Open, AppMode::Code] {
+            let mut app = sample_app();
+            app.mode = mode;
+            app.history.entries.push(crate::history::HistoryEntry {
+                path: PathBuf::from("/root/a"),
+                timestamp: 1,
+            });
+            app.history_list_state.select(Some(0));
+
+            let result = app.select_from_history();
+            assert_eq!(result.map(|(_, m)| m), Some(mode));
+        }
+    }
+
+    #[test]
+    fn history_mode_toggle_cycles_modes() {
+        let mut app = sample_app();
+        app.history.entries.push(crate::history::HistoryEntry {
+            path: PathBuf::from("/root/a"),
+            timestamp: 1,
+        });
+
+        // Enter history mode, toggle mode from Cd -> Open
+        app.toggle_history_mode();
+        assert!(app.history_mode);
+        assert_eq!(app.mode, AppMode::Cd);
+
+        app.mode.toggle();
+        assert_eq!(app.mode, AppMode::Open);
+
+        // Select should use the current mode (Open)
+        app.history_list_state.select(Some(0));
+        let result = app.select_from_history();
+        assert_eq!(result.map(|(_, m)| m), Some(AppMode::Open));
+    }
+
+    #[test]
+    fn history_mode_preserves_mode_on_toggle() {
+        let mut app = sample_app();
+        app.mode = AppMode::Code;
+
+        // Enter history mode, mode should be preserved
+        app.toggle_history_mode();
+        assert_eq!(app.mode, AppMode::Code);
+
+        // Exit history mode, mode still preserved
+        app.toggle_history_mode();
+        assert_eq!(app.mode, AppMode::Code);
     }
 
     #[test]
@@ -856,7 +907,7 @@ impl App {
         let path = self.selected_history_path()?;
         self.history.record(path.clone());
         let path_str = path.to_string_lossy().to_string();
-        Some((path_str, AppMode::Cd))
+        Some((path_str, self.mode))
     }
 
     pub fn record_and_get_path(&mut self) -> Option<(String, AppMode)> {
