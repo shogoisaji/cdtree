@@ -124,9 +124,13 @@ impl App {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/"));
         let current_dir = std::env::current_dir()?;
+        let config = Config::load().unwrap_or_default();
+        let show_files = config.show_files;
+        let show_hidden = config.show_hidden;
+        let history = History::load().unwrap_or_default();
         
         let mut root = FileNode::new(home_dir.clone(), true);
-        root.load_children(false, false)?; 
+        root.load_children(show_files, show_hidden)?; 
         root.expanded = true;
 
         let selected_path = if current_dir.starts_with(&home_dir) {
@@ -134,11 +138,6 @@ impl App {
         } else {
             home_dir.clone()
         };
-
-        let config = Config::load().unwrap_or_default();
-        let show_files = config.show_files;
-        let show_hidden = config.show_hidden;
-        let history = History::load().unwrap_or_default();
 
         let mut app = Self {
             root,
@@ -678,6 +677,42 @@ mod tests {
         assert!(level1_node.expanded);
         let leaf_node = App::find_node(&app.root, canonical_current.as_path()).unwrap();
         assert!(leaf_node.expanded);
+    }
+
+    #[test]
+    fn app_new_applies_visibility_config_to_initial_root_load() {
+        let _lock = env_lock();
+        let temp = TempDir::new("cdtree_app_new_config");
+        let home = temp.path.join("home");
+        create_dir(&home);
+        create_dir(&home.join(".hidden_dir"));
+        create_file(&home.join(".hidden_file"));
+        create_file(&home.join("visible_file"));
+
+        let canonical_home = home.canonicalize().unwrap();
+        let _cwd_guard = CurrentDirGuard::set(&canonical_home);
+        let _home_guard = EnvGuard::set("HOME", canonical_home.to_str().unwrap());
+
+        let mut config = Config::default();
+        config.show_files = true;
+        config.show_hidden = true;
+        config.save().unwrap();
+
+        let app = App::new().unwrap();
+        let names: Vec<_> = app
+            .root
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.name())
+            .collect();
+
+        assert!(app.show_files);
+        assert!(app.show_hidden);
+        assert!(names.contains(&".hidden_dir".to_string()));
+        assert!(names.contains(&".hidden_file".to_string()));
+        assert!(names.contains(&"visible_file".to_string()));
     }
 
     #[test]
