@@ -134,6 +134,8 @@ fn main() -> Result<()> {
         Ok(terminal) => terminal,
         Err(err) => {
             let _ = disable_raw_mode();
+            let mut stderr = io::stderr();
+            let _ = execute!(stderr, DisableMouseCapture, LeaveAlternateScreen);
             return Err(err.into());
         }
     };
