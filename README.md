@@ -62,6 +62,20 @@ source ~/.zshrc
 
 If you use Bash, source `~/.bashrc` instead.
 
+The setup command writes a marked cdtree block to your shell rc file and only sources the launcher when it exists.
+
+To inspect the current integration:
+
+```bash
+cdtree --doctor
+```
+
+To remove the shell integration:
+
+```bash
+cdtree --uninstall
+```
+
 ## Usage
 
 Simply run:
