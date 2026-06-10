@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::cmp::Ordering;
-use std::io;
-use ratatui::widgets::ListState;
-use crate::config::{Config, Theme, RgbColor};
+use crate::config::{Config, RgbColor, Theme};
 use crate::history::History;
 use rand::Rng;
+use ratatui::widgets::ListState;
+use std::cmp::Ordering;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,9 +18,9 @@ pub enum AppMode {
 impl AppMode {
     pub fn suffix(&self) -> &str {
         match self {
-            AppMode::Cd => "_CD",
-            AppMode::Open => "_OPEN",
-            AppMode::Code => "_CODE",
+            AppMode::Cd => "🌲CD🌲",
+            AppMode::Open => "🌲OPEN🌲",
+            AppMode::Code => "🌲CODE🌲",
         }
     }
 
@@ -39,6 +39,8 @@ pub struct FileNode {
     pub is_dir: bool,
     pub children: Option<Vec<FileNode>>, // None if not loaded or not a dir
     pub expanded: bool,
+    pub cached_counts: Option<(usize, usize)>, // (dir_count, file_count) cached for display
+    pub child_count_attempted: bool,
 }
 
 impl FileNode {
@@ -48,14 +50,76 @@ impl FileNode {
             is_dir,
             children: None,
             expanded: false,
+            cached_counts: None,
+            child_count_attempted: false,
         }
     }
 
     pub fn name(&self) -> String {
-        self.path.file_name()
+        self.path
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string()
+    }
+
+    /// Returns cached (dir_count, file_count) of direct children.
+    /// Returns None if counts haven't been determined yet.
+    pub fn child_counts(&self) -> Option<(usize, usize)> {
+        if let Some(children) = &self.children {
+            let counts = children.iter().fold((0, 0), |(dirs, files), child| {
+                if child.is_dir {
+                    (dirs + 1, files)
+                } else {
+                    (dirs, files + 1)
+                }
+            });
+            Some(counts)
+        } else {
+            self.cached_counts
+        }
+    }
+
+    /// Lightweight count of children without building FileNode structs.
+    /// Only reads directory entries and counts them, caching the result.
+    pub fn load_child_counts(&mut self, show_files: bool, show_hidden: bool) {
+        if !self.is_dir || self.children.is_some() || self.child_count_attempted {
+            return;
+        }
+
+        self.child_count_attempted = true;
+
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return;
+        };
+        let (dirs, files) = entries
+            .filter_map(|e| e.ok())
+            .fold((0, 0), |(d, f), entry| {
+                let path = entry.path();
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_hidden = file_name.starts_with('.');
+
+                if !show_hidden && is_hidden {
+                    return (d, f);
+                }
+
+                let Ok(file_type) = entry.file_type() else {
+                    return (d, f);
+                };
+                let is_dir = if file_type.is_symlink() {
+                    path.is_dir()
+                } else {
+                    file_type.is_dir()
+                };
+
+                if !show_files && !is_dir {
+                    return (d, f);
+                }
+
+                if is_dir { (d + 1, f) } else { (d, f + 1) }
+            });
+
+        self.cached_counts = Some((dirs, files));
     }
 
     pub fn load_children(&mut self, show_files: bool, show_hidden: bool) -> io::Result<()> {
@@ -88,13 +152,21 @@ impl FileNode {
             entries.push(FileNode::new(path, is_dir));
         }
 
-        entries.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => Ordering::Less,
-                (false, true) => Ordering::Greater,
-                _ => a.path.file_name().cmp(&b.path.file_name()),
-            }
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => a.path.file_name().cmp(&b.path.file_name()),
         });
+
+        let (dirs, files) =
+            entries.iter().fold(
+                (0, 0),
+                |(d, f), e| {
+                    if e.is_dir { (d + 1, f) } else { (d, f + 1) }
+                },
+            );
+        self.cached_counts = Some((dirs, files));
+        self.child_count_attempted = true;
 
         self.children = Some(entries);
         Ok(())
@@ -128,9 +200,9 @@ impl App {
         let show_files = config.show_files;
         let show_hidden = config.show_hidden;
         let history = History::load().unwrap_or_default();
-        
+
         let mut root = FileNode::new(home_dir.clone(), true);
-        root.load_children(show_files, show_hidden)?; 
+        root.load_children(show_files, show_hidden)?;
         root.expanded = true;
 
         let selected_path = if current_dir.starts_with(&home_dir) {
@@ -165,11 +237,15 @@ impl App {
         // Ensure valid selection even when starting outside the home directory
         app.ensure_valid_selection();
         app.update_list_state();
-        if let Some(pos) = app.get_visible_nodes().iter().position(|(_, node)| node.path == app.selected_path) {
+        if let Some(pos) = app
+            .get_visible_nodes()
+            .iter()
+            .position(|(_, node)| node.path == app.selected_path)
+        {
             // Scroll the selected item to the top on startup
             *app.list_state.offset_mut() = pos;
         }
-        
+
         Ok(app)
     }
 
@@ -195,13 +271,13 @@ impl App {
             });
         }
     }
-    
+
     // Returns (prefix, node_reference)
     pub fn get_visible_nodes(&self) -> Vec<(String, &FileNode)> {
         let mut result = Vec::new();
         let mut is_last_stack = Vec::new();
         result.push(("".to_string(), &self.root));
-        
+
         if self.root.expanded {
             if let Some(children) = &self.root.children {
                 let count = children.len();
@@ -215,10 +291,14 @@ impl App {
         result
     }
 
-    fn collect_visible_nodes<'a>(node: &'a FileNode, is_last_stack: &mut Vec<bool>, result: &mut Vec<(String, &'a FileNode)>) {
+    fn collect_visible_nodes<'a>(
+        node: &'a FileNode,
+        is_last_stack: &mut Vec<bool>,
+        result: &mut Vec<(String, &'a FileNode)>,
+    ) {
         let prefix = Self::build_prefix(is_last_stack);
         result.push((prefix, node));
-        
+
         if node.expanded {
             if let Some(children) = &node.children {
                 let count = children.len();
@@ -228,6 +308,29 @@ impl App {
                     is_last_stack.pop();
                 }
             }
+        }
+    }
+
+    /// Pre-load child counts for visible directory rows that haven't been counted yet.
+    /// Uses lightweight `fs::read_dir` counting (no FileNode creation) and caches results.
+    pub fn ensure_visible_child_counts(&mut self, first_row: usize, row_count: usize) {
+        let show_files = self.show_files;
+        let show_hidden = self.show_hidden;
+        let paths: Vec<PathBuf> = self
+            .get_visible_nodes()
+            .into_iter()
+            .skip(first_row)
+            .take(row_count)
+            .filter(|(_, node)| {
+                node.is_dir && node.children.is_none() && !node.child_count_attempted
+            })
+            .map(|(_, node)| node.path.clone())
+            .collect();
+
+        for path in paths {
+            Self::find_and_modify(&mut self.root, path.as_path(), |node| {
+                node.load_child_counts(show_files, show_hidden);
+            });
         }
     }
 
@@ -251,10 +354,14 @@ impl App {
 
     pub fn move_selection(&mut self, delta: i32) {
         let visible = self.get_visible_nodes();
-        if visible.is_empty() { return; }
+        if visible.is_empty() {
+            return;
+        }
 
-        let current_idx = visible.iter().position(|(_, node)| node.path == self.selected_path);
-        
+        let current_idx = visible
+            .iter()
+            .position(|(_, node)| node.path == self.selected_path);
+
         if let Some(idx) = current_idx {
             let max_idx = (visible.len() - 1) as i32;
             let new_idx = (idx as i32 + delta).clamp(0, max_idx) as usize;
@@ -265,13 +372,15 @@ impl App {
 
     pub fn update_list_state(&mut self) {
         let visible = self.get_visible_nodes();
-        if let Some(pos) = visible.iter().position(|(_, node)| node.path == self.selected_path) {
+        if let Some(pos) = visible
+            .iter()
+            .position(|(_, node)| node.path == self.selected_path)
+        {
             self.list_state.select(Some(pos));
         } else {
             self.list_state.select(None);
         }
     }
-
 
     pub fn expand_current(&mut self) {
         let show_files = self.show_files;
@@ -297,7 +406,9 @@ impl App {
 
     // Helper to traverse and mutate
     fn find_and_modify<F>(node: &mut FileNode, target: &Path, f: F) -> bool
-    where F: Fn(&mut FileNode) + Copy {
+    where
+        F: Fn(&mut FileNode) + Copy,
+    {
         if node.path.as_path() == target {
             f(node);
             return true;
@@ -331,7 +442,7 @@ impl App {
         }
         None
     }
-    
+
     pub fn on_left(&mut self) {
         let selected = self.selected_path.clone();
         let parent_path = Self::find_parent_path(&self.root, selected.as_path());
@@ -348,7 +459,7 @@ impl App {
 
         self.update_list_state();
     }
-    
+
     fn find_parent_path(node: &FileNode, target: &Path) -> Option<PathBuf> {
         fn walk(node: &FileNode, target: &Path, parent: Option<&Path>) -> Option<PathBuf> {
             if node.path.as_path() == target {
@@ -373,7 +484,7 @@ impl App {
         let _ = self.config.save();
         self.refresh_after_toggle();
     }
-    
+
     pub fn toggle_show_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
         self.config.show_hidden = self.show_hidden;
@@ -382,19 +493,25 @@ impl App {
     }
 
     fn refresh_after_toggle(&mut self) {
+        Self::clear_child_count_cache(&mut self.root);
         self.reload_all();
         let selected = self.selected_path.clone();
         self.expand_to_path(selected.as_path());
         self.ensure_valid_selection();
         self.update_list_state();
     }
-    
+
     fn ensure_valid_selection(&mut self) {
         let visible = self.get_visible_nodes();
-        if visible.is_empty() { return; }
+        if visible.is_empty() {
+            return;
+        }
 
         // Check if current selection is still visible
-        if visible.iter().any(|(_, node)| node.path == self.selected_path) {
+        if visible
+            .iter()
+            .any(|(_, node)| node.path == self.selected_path)
+        {
             return;
         }
 
@@ -418,22 +535,31 @@ impl App {
         let show_hidden = self.show_hidden;
         Self::traverse_and_reload(&mut self.root, show_files, show_hidden);
     }
-    
-    fn traverse_and_reload(node: &mut FileNode, show_files: bool, show_hidden: bool) {
-         if node.is_dir && node.expanded {
-             if node.load_children(show_files, show_hidden).is_err() {
-                 node.expanded = false;
-                 node.children = None;
-                 return;
-             }
-             if let Some(children) = &mut node.children {
-                 for child in children {
-                     Self::traverse_and_reload(child, show_files, show_hidden);
-                 }
-             }
-         }
+
+    fn clear_child_count_cache(node: &mut FileNode) {
+        node.cached_counts = None;
+        node.child_count_attempted = false;
+        if let Some(children) = &mut node.children {
+            for child in children {
+                Self::clear_child_count_cache(child);
+            }
+        }
     }
 
+    fn traverse_and_reload(node: &mut FileNode, show_files: bool, show_hidden: bool) {
+        if node.is_dir && (node.expanded || node.children.is_some()) {
+            if node.load_children(show_files, show_hidden).is_err() {
+                node.expanded = false;
+                node.children = None;
+                return;
+            }
+            if let Some(children) = &mut node.children {
+                for child in children {
+                    Self::traverse_and_reload(child, show_files, show_hidden);
+                }
+            }
+        }
+    }
 
     pub fn change_theme_random(&mut self) {
         let mut rng = rand::rng();
@@ -468,10 +594,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{CurrentDirGuard, EnvGuard, env_lock};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use crate::test_support::{env_lock, CurrentDirGuard, EnvGuard};
 
     struct TempDir {
         path: PathBuf,
@@ -548,19 +674,191 @@ mod tests {
 
         let mut node = FileNode::new(root.clone(), true);
         node.load_children(false, false).unwrap();
-        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        let names: Vec<_> = node
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|n| n.name())
+            .collect();
         assert_eq!(names, vec!["a_dir", "b_dir"]);
 
         node.load_children(true, false).unwrap();
-        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        let names: Vec<_> = node
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|n| n.name())
+            .collect();
         assert_eq!(names, vec!["a_dir", "b_dir", "a.txt", "z.txt"]);
 
         node.load_children(true, true).unwrap();
-        let names: Vec<_> = node.children.as_ref().unwrap().iter().map(|n| n.name()).collect();
+        let names: Vec<_> = node
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|n| n.name())
+            .collect();
         assert_eq!(
             names,
             vec![".hdir", "a_dir", "b_dir", ".hidden", "a.txt", "z.txt"]
         );
+    }
+
+    #[test]
+    fn load_child_counts_filters_and_caches() {
+        let temp = TempDir::new("cdtree_load_child_counts");
+        let root = temp.path.join("root");
+        create_dir(&root);
+        create_dir(&root.join("a_dir"));
+        create_dir(&root.join("b_dir"));
+        create_dir(&root.join(".hdir"));
+        create_file(&root.join("a.txt"));
+        create_file(&root.join("z.txt"));
+        create_file(&root.join(".hidden"));
+
+        let mut node = FileNode::new(root.clone(), true);
+        node.load_child_counts(false, false);
+        assert_eq!(node.child_counts(), Some((2, 0)));
+        assert!(node.child_count_attempted);
+
+        let mut node = FileNode::new(root.clone(), true);
+        node.load_child_counts(true, false);
+        assert_eq!(node.child_counts(), Some((2, 2)));
+
+        let mut node = FileNode::new(root, true);
+        node.load_child_counts(true, true);
+        assert_eq!(node.child_counts(), Some((3, 3)));
+    }
+
+    #[test]
+    fn ensure_visible_child_counts_only_counts_drawn_rows() {
+        let temp = TempDir::new("cdtree_visible_counts");
+        let root = temp.path.join("root");
+        let first = root.join("first");
+        let second = root.join("second");
+        create_dir(&first);
+        create_dir(&second);
+        create_file(&first.join("file.txt"));
+        create_file(&second.join("file.txt"));
+
+        let mut root_node = FileNode::new(root.clone(), true);
+        root_node.load_children(true, true).unwrap();
+        root_node.expanded = true;
+
+        let mut app = App {
+            root: root_node,
+            selected_path: root.clone(),
+            startup_path: root.clone(),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
+            mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            home_dir: root.clone(),
+        };
+
+        app.ensure_visible_child_counts(1, 1);
+
+        let first_node = App::find_node(&app.root, first.as_path()).unwrap();
+        let second_node = App::find_node(&app.root, second.as_path()).unwrap();
+        assert_eq!(first_node.child_counts(), Some((0, 1)));
+        assert_eq!(second_node.child_counts(), None);
+        assert!(!second_node.child_count_attempted);
+    }
+
+    #[test]
+    fn ensure_visible_child_counts_skips_collapsed_descendants() {
+        let temp = TempDir::new("cdtree_collapsed_counts");
+        let root = temp.path.join("root");
+        let collapsed = root.join("collapsed");
+        let descendant = collapsed.join("descendant");
+        create_dir(&descendant);
+        create_file(&descendant.join("file.txt"));
+
+        let mut descendant_node = FileNode::new(descendant.clone(), true);
+        let mut collapsed_node = FileNode::new(collapsed.clone(), true);
+        collapsed_node.children = Some(vec![descendant_node.clone()]);
+
+        let mut root_node = FileNode::new(root.clone(), true);
+        root_node.expanded = true;
+        root_node.children = Some(vec![collapsed_node]);
+
+        let mut app = App {
+            root: root_node,
+            selected_path: root.clone(),
+            startup_path: root.clone(),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
+            mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            home_dir: root.clone(),
+        };
+
+        app.ensure_visible_child_counts(0, 100);
+
+        descendant_node = App::find_node(&app.root, descendant.as_path())
+            .unwrap()
+            .clone();
+        assert!(!descendant_node.child_count_attempted);
+        assert_eq!(descendant_node.child_counts(), None);
+    }
+
+    #[test]
+    fn failed_child_count_is_not_retried_until_cache_is_cleared() {
+        let temp = TempDir::new("cdtree_failed_counts");
+        let root = temp.path.join("root");
+        let missing = root.join("missing");
+        create_dir(&root);
+
+        let mut root_node = FileNode::new(root.clone(), true);
+        root_node.expanded = true;
+        root_node.children = Some(vec![FileNode::new(missing.clone(), true)]);
+
+        let mut app = App {
+            root: root_node,
+            selected_path: root.clone(),
+            startup_path: root.clone(),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
+            mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            home_dir: root.clone(),
+        };
+
+        app.ensure_visible_child_counts(1, 1);
+        create_dir(&missing);
+        create_file(&missing.join("file.txt"));
+        app.ensure_visible_child_counts(1, 1);
+
+        let missing_node = App::find_node(&app.root, missing.as_path()).unwrap();
+        assert!(missing_node.child_count_attempted);
+        assert_eq!(missing_node.child_counts(), None);
+
+        App::clear_child_count_cache(&mut app.root);
+        app.ensure_visible_child_counts(1, 1);
+
+        let missing_node = App::find_node(&app.root, missing.as_path()).unwrap();
+        assert_eq!(missing_node.child_counts(), Some((0, 1)));
     }
 
     #[test]
