@@ -15,6 +15,11 @@ pub struct TreeWidget<'a> {
     app: &'a mut App,
 }
 
+// NOTE: The list content area below (double-bordered outer block + vertical
+// [Min(1), Length(2)]) is mirrored by `list_content_area` in main.rs for mouse
+// hit-testing. If you change the border type, borders, or layout constraints
+// here, update `list_content_area` to match.
+
 impl<'a> TreeWidget<'a> {
     pub fn new(app: &'a mut App) -> Self {
         Self { app }

@@ -391,6 +391,52 @@ impl App {
         self.update_list_state();
     }
 
+    /// Toggle expansion of the currently selected node.
+    /// Collapses expanded directories and expands collapsed ones; files are a no-op.
+    pub fn toggle_current(&mut self) {
+        let show_files = self.show_files;
+        let show_hidden = self.show_hidden;
+        let selected = self.selected_path.clone();
+        Self::find_and_modify(&mut self.root, selected.as_path(), |node| {
+            if !node.is_dir {
+                return;
+            }
+            if node.expanded {
+                node.expanded = false;
+            } else {
+                Self::expand_dir(node, show_files, show_hidden);
+            }
+        });
+        self.update_list_state();
+    }
+
+    /// Select the visible node at the given flat index (as used by the List widget).
+    /// Out-of-bounds indices are ignored.
+    pub fn select_visible_index(&mut self, idx: usize) {
+        let visible = self.get_visible_nodes();
+        if let Some((_, node)) = visible.get(idx) {
+            self.selected_path = node.path.clone();
+            // We already know the flat index, so set it directly instead of
+            // re-walking the tree via `update_list_state`.
+            self.list_state.select(Some(idx));
+        }
+    }
+
+    /// Scroll the tree viewport by `delta` rows without changing the selection.
+    /// The offset is clamped to >= 0; ratatui clamps the upper bound at render time.
+    pub fn scroll(&mut self, delta: i32) {
+        let current = self.list_state.offset() as i32;
+        let new = (current + delta).max(0) as usize;
+        *self.list_state.offset_mut() = new;
+    }
+
+    /// Scroll the history viewport by `delta` rows without changing the selection.
+    pub fn scroll_history(&mut self, delta: i32) {
+        let current = self.history_list_state.offset() as i32;
+        let new = (current + delta).max(0) as usize;
+        *self.history_list_state.offset_mut() = new;
+    }
+
     fn expand_dir(node: &mut FileNode, show_files: bool, show_hidden: bool) {
         if node.is_dir {
             if !node.expanded {
@@ -908,6 +954,97 @@ mod tests {
         assert_eq!(app.selected_path, PathBuf::from("/root"));
         let a_node = App::find_node(&app.root, Path::new("/root/a")).unwrap();
         assert!(!a_node.expanded);
+    }
+
+    #[test]
+    fn toggle_current_collapses_expanded_dir() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a");
+        assert!(App::find_node(&app.root, Path::new("/root/a")).unwrap().expanded);
+        app.toggle_current();
+        assert!(!App::find_node(&app.root, Path::new("/root/a")).unwrap().expanded);
+    }
+
+    #[test]
+    fn toggle_current_expands_collapsed_dir() {
+        let mut app = sample_app();
+        // give b pre-loaded children so toggle doesn't hit the filesystem
+        if let Some(children) = app.root.children.as_mut() {
+            children[1].children = Some(vec![]);
+        }
+        app.selected_path = PathBuf::from("/root/b");
+        assert!(!App::find_node(&app.root, Path::new("/root/b")).unwrap().expanded);
+        app.toggle_current();
+        assert!(App::find_node(&app.root, Path::new("/root/b")).unwrap().expanded);
+    }
+
+    #[test]
+    fn toggle_current_noop_for_file() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root/a/ab"); // file
+        app.toggle_current();
+        assert_eq!(app.selected_path, PathBuf::from("/root/a/ab"));
+    }
+
+    #[test]
+    fn select_visible_index_sets_selected_path() {
+        let mut app = sample_app();
+        app.select_visible_index(3); // /root/a/ab
+        assert_eq!(app.selected_path, PathBuf::from("/root/a/ab"));
+        assert_eq!(app.list_state.selected(), Some(3));
+    }
+
+    #[test]
+    fn select_visible_index_out_of_bounds_is_noop() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root");
+        app.select_visible_index(100);
+        assert_eq!(app.selected_path, PathBuf::from("/root"));
+    }
+
+    #[test]
+    fn scroll_down_increases_offset_without_changing_selection() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root");
+        *app.list_state.offset_mut() = 0;
+        app.scroll(1);
+        assert_eq!(app.list_state.offset(), 1);
+        assert_eq!(app.selected_path, PathBuf::from("/root"));
+    }
+
+    #[test]
+    fn scroll_up_decreases_offset_without_changing_selection() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root");
+        *app.list_state.offset_mut() = 2;
+        app.scroll(-1);
+        assert_eq!(app.list_state.offset(), 1);
+        assert_eq!(app.selected_path, PathBuf::from("/root"));
+    }
+
+    #[test]
+    fn scroll_up_at_zero_clamps_to_zero() {
+        let mut app = sample_app();
+        app.selected_path = PathBuf::from("/root");
+        *app.list_state.offset_mut() = 0;
+        app.scroll(-1);
+        assert_eq!(app.list_state.offset(), 0);
+    }
+
+    #[test]
+    fn scroll_history_changes_offset_without_changing_selection() {
+        let mut app = sample_app();
+        for i in 0..3 {
+            app.history.entries.push(crate::history::HistoryEntry {
+                path: PathBuf::from(format!("/root/dir{}", i)),
+                timestamp: i as i64,
+            });
+        }
+        app.history_list_state.select(Some(1));
+        *app.history_list_state.offset_mut() = 0;
+        app.scroll_history(1);
+        assert_eq!(app.history_list_state.offset(), 1);
+        assert_eq!(app.history_list_state.selected(), Some(1));
     }
 
     #[test]

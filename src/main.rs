@@ -1,14 +1,15 @@
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 // Command constants
 #[cfg(target_os = "macos")]
@@ -181,19 +182,24 @@ fn run_app<B: ratatui::backend::Backend>(
 where
     <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
 {
+    // (clicked path, time) of the last mouse click, for double-click detection.
+    let mut last_click: Option<(PathBuf, Instant)> = None;
+    const DOUBLE_CLICK_MS: u128 = 400;
+
     loop {
         terminal
             .draw(|f| {
                 let ui = TreeWidget::new(&mut app);
                 f.render_widget(ui, f.area());
             })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
-        if event::poll(std::time::Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != event::KeyEventKind::Press {
-                    continue;
-                }
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) if key.kind == event::KeyEventKind::Press => {
                 if app.history_mode {
                     match key.code {
                         KeyCode::Char(' ') | KeyCode::Esc => {
@@ -228,7 +234,7 @@ where
                         KeyCode::Right | KeyCode::Char('l') => app.expand_current(),
                         KeyCode::Left | KeyCode::Char('h') => app.on_left(),
                         KeyCode::Char('t') => {
-                            let now = std::time::Instant::now();
+                            let now = Instant::now();
                             if let Some(last) = app.last_theme_change {
                                 if now.duration_since(last).as_millis() < 200 {
                                     app.reset_theme_default();
@@ -248,7 +254,118 @@ where
                     }
                 }
             }
+            Event::Mouse(mouse) => {
+                let area: Rect = terminal
+                    .size()
+                    .map_err(io::Error::other)?
+                    .into();
+                let list_area = list_content_area(area);
+
+                // Ignore clicks outside the list region.
+                let in_list = mouse.row >= list_area.top()
+                    && mouse.row < list_area.top() + list_area.height;
+
+                match mouse.kind {
+                    MouseEventKind::ScrollUp if in_list => {
+                        if app.history_mode {
+                            app.scroll_history(-1);
+                        } else {
+                            app.scroll(-1);
+                        }
+                    }
+                    MouseEventKind::ScrollDown if in_list => {
+                        if app.history_mode {
+                            app.scroll_history(1);
+                        } else {
+                            app.scroll(1);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) if in_list => {
+                        let offset = if app.history_mode {
+                            app.history_list_state.offset()
+                        } else {
+                            app.list_state.offset()
+                        };
+                        let idx = (mouse.row - list_area.top()) as usize + offset;
+
+                        if app.history_mode {
+                            if idx >= app.history.entries.len() {
+                                last_click = None;
+                                continue;
+                            }
+                            app.history_list_state.select(Some(idx));
+                            let clicked_path =
+                                app.history.entries[idx].path.clone();
+                            let now = Instant::now();
+                            let is_double = last_click
+                                .as_ref()
+                                .map(|(p, t)| {
+                                    *p == clicked_path
+                                        && now.duration_since(*t).as_millis()
+                                            < DOUBLE_CLICK_MS
+                                })
+                                .unwrap_or(false);
+                            if is_double {
+                                if let Some(result) = app.select_from_history() {
+                                    return Ok(Some(result));
+                                }
+                                last_click = None;
+                            } else {
+                                last_click = Some((clicked_path, now));
+                            }
+                        } else {
+                            let visible = app.get_visible_nodes();
+                            if idx >= visible.len() {
+                                last_click = None;
+                                continue;
+                            }
+                            let clicked_path = visible[idx].1.path.clone();
+                            app.select_visible_index(idx);
+
+                            let now = Instant::now();
+                            let is_double = last_click
+                                .as_ref()
+                                .map(|(p, t)| {
+                                    *p == clicked_path
+                                        && now.duration_since(*t).as_millis()
+                                            < DOUBLE_CLICK_MS
+                                })
+                                .unwrap_or(false);
+
+                            if is_double {
+                                if let Some(result) = app.record_and_get_path() {
+                                    return Ok(Some(result));
+                                }
+                                last_click = None;
+                            } else {
+                                // Single click toggles expansion of the clicked directory.
+                                app.toggle_current();
+                                last_click = Some((clicked_path, now));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
+    }
+}
+
+/// Compute the inner list area that the tree/history `List` widget is rendered into,
+/// mirroring the layout in `ui.rs` (outer double-bordered block + vertical [Min(1), Length(2)]).
+fn list_content_area(area: Rect) -> Rect {
+    let content = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    Rect {
+        x: content.x,
+        y: content.y,
+        width: content.width,
+        height: content.height.saturating_sub(2),
     }
 }
 
@@ -295,5 +412,22 @@ mod tests {
     #[test]
     fn cd_target_accepts_existing_absolute_directory() {
         assert!(is_safe_cd_target(std::env::temp_dir().to_str().unwrap()));
+    }
+
+    #[test]
+    fn list_content_area_matches_ui_layout() {
+        // Outer block has a 1-cell border on every side; the vertical layout
+        // reserves 2 rows for the guide, leaving the rest for the list.
+        let area = Rect::new(0, 0, 80, 24);
+        let list = list_content_area(area);
+        assert_eq!(list, Rect::new(1, 1, 78, 20));
+    }
+
+    #[test]
+    fn list_content_area_handles_small_terminal() {
+        let area = Rect::new(0, 0, 40, 5);
+        let list = list_content_area(area);
+        // 5 - 2 (borders) - 2 (guide) = 1 row for the list
+        assert_eq!(list.height, 1);
     }
 }
