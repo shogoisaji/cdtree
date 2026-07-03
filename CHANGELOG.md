@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0] - 2026-07-03
+
+### Added
+- Mouse support: scroll wheel scrolls the tree/history viewport without moving the selection
+- Single click selects a row and toggles directory expansion (tree mode) / selects a history entry
+- Double click confirms the selection (cd/open/code), mirroring Enter behavior
+- `App::toggle_current`, `select_visible_index`, `scroll`, `scroll_history` for mouse-driven interaction
+
+### Changed
+- `run_app` event loop refactored to handle `Event::Mouse` alongside `Event::Key`
+- `list_content_area` mirrors the `ui.rs` list layout for accurate mouse hit-testing
+- Replace `io::Error::new(io::ErrorKind::Other, ..)` with `io::Error::other` to satisfy clippy
+
 ## [0.1.11] - 2026-06-06
 
 ### Added
