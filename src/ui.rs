@@ -1,4 +1,4 @@
-use crate::app::{App, FileNode};
+use crate::app::{App, FileNode, name_match_ranges};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -8,6 +8,13 @@ use ratatui::{
         Block, BorderType, Borders, List, ListItem, Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
+
+/// Preferred inner width of the top-right search field (excluding brackets).
+const SEARCH_FIELD_WIDTH: usize = 16;
+/// `" CDTREE "` as rendered on the left of the outer block.
+const LEFT_TITLE_WIDTH: usize = 9;
+/// `" Find ["` + `"] "` around the field.
+const SEARCH_FORM_CHROME: usize = 9;
 
 const LEFT_PAD: &str = "  ";
 
@@ -52,11 +59,26 @@ impl<'a> Widget for TreeWidget<'a> {
             )])
         };
 
-        let outer_block = Block::default()
+        let mut outer_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(self.app.current_theme.border_style.into()))
             .title(title);
+        if self.app.search_mode {
+            let label_style = Style::default()
+                .fg(self.app.current_theme.key_highlight.into())
+                .add_modifier(Modifier::BOLD);
+            let field_style = Style::default()
+                .bg(self.app.current_theme.key_highlight.into())
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD);
+            outer_block = outer_block.title(Self::search_form_title(
+                &self.app.search_query,
+                area.width,
+                label_style,
+                field_style,
+            ));
+        }
         let content_area = outer_block.inner(area);
         outer_block.render(area, buf);
 
@@ -88,6 +110,93 @@ impl<'a> TreeWidget<'a> {
             .bg(app.current_theme.border_fg.into())
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD)
+    }
+
+    fn search_field_width(area_width: u16) -> usize {
+        let available = (area_width as usize)
+            .saturating_sub(2) // left/right border corners
+            .saturating_sub(LEFT_TITLE_WIDTH)
+            .saturating_sub(2) // gap between left title and form
+            .saturating_sub(SEARCH_FORM_CHROME);
+        available.clamp(4, SEARCH_FIELD_WIDTH)
+    }
+
+    /// Visible contents of the search field, with a trailing cursor and right padding.
+    fn search_field_contents(query: &str, field_width: usize) -> String {
+        let budget = field_width.saturating_sub(1);
+        let visible = if query.chars().count() <= budget {
+            query.to_string()
+        } else {
+            let skip = query.chars().count() - budget;
+            query.chars().skip(skip).collect()
+        };
+        let used = visible.chars().count() + 1;
+        let pad = field_width.saturating_sub(used);
+        format!("{visible}_{}", " ".repeat(pad))
+    }
+
+    fn search_form_line(
+        query: &str,
+        field_width: usize,
+        label_style: Style,
+        field_style: Style,
+    ) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(" Find ", label_style),
+            Span::styled(
+                format!("[{}]", Self::search_field_contents(query, field_width)),
+                field_style,
+            ),
+            Span::raw(" "),
+        ])
+    }
+
+    fn search_form_title(
+        query: &str,
+        area_width: u16,
+        label_style: Style,
+        field_style: Style,
+    ) -> Line<'static> {
+        Self::search_form_line(
+            query,
+            Self::search_field_width(area_width),
+            label_style,
+            field_style,
+        )
+        .right_aligned()
+    }
+
+    fn search_match_style() -> Style {
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    fn name_spans(
+        name: &str,
+        query: &str,
+        name_style: Style,
+        match_style: Style,
+    ) -> Vec<Span<'static>> {
+        let ranges = name_match_ranges(name, query);
+        if ranges.is_empty() {
+            return vec![Span::styled(name.to_string(), name_style)];
+        }
+
+        let mut spans = Vec::new();
+        let mut last = 0;
+        for &(start, end) in &ranges {
+            if start > last {
+                spans.push(Span::styled(name[last..start].to_string(), name_style));
+            }
+            spans.push(Span::styled(name[start..end].to_string(), match_style));
+            last = end;
+        }
+        if last < name.len() {
+            spans.push(Span::styled(name[last..].to_string(), name_style));
+        }
+        spans
     }
 
     fn name_style(app: &App, node: &FileNode, is_selected: bool) -> Style {
@@ -126,6 +235,11 @@ impl<'a> TreeWidget<'a> {
                 let display_name = Self::display_name(node);
                 let name_style = Self::name_style(self.app, node, is_selected);
                 let prefix = prefix.clone();
+                let query = if self.app.search_mode {
+                    self.app.search_query.as_str()
+                } else {
+                    ""
+                };
 
                 let mut spans = vec![
                     Span::raw(LEFT_PAD),
@@ -133,8 +247,13 @@ impl<'a> TreeWidget<'a> {
                         prefix,
                         Style::default().fg(self.app.current_theme.branch_color.into()),
                     ),
-                    Span::styled(display_name, name_style),
                 ];
+                spans.extend(Self::name_spans(
+                    &display_name,
+                    query,
+                    name_style,
+                    Self::search_match_style(),
+                ));
 
                 if node.is_dir {
                     if let Some((dirs, files)) = node.child_counts() {
@@ -172,38 +291,52 @@ impl<'a> TreeWidget<'a> {
         let list = List::new(items);
         StatefulWidget::render(list, tree_area, buf, &mut self.app.list_state);
 
-        let files_style = if self.app.show_files {
-            Style::default()
-                .fg(self.app.current_theme.key_highlight.into())
-                .add_modifier(Modifier::BOLD)
+        let guide_line = if self.app.search_mode {
+            Line::from(vec![
+                Span::raw(LEFT_PAD),
+                Span::styled("Esc", key_style),
+                Span::styled(" Exit  ", label_style),
+                Span::styled("Enter", key_style),
+                Span::styled(" Select  ", label_style),
+                Span::styled("↑/↓/→/←", key_style),
+                Span::styled(" Move", label_style),
+            ])
         } else {
-            Style::default().fg(self.app.current_theme.border_style_soft.into())
-        };
-        let hidden_style = if self.app.show_hidden {
-            Style::default()
-                .fg(self.app.current_theme.key_highlight.into())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.app.current_theme.border_style_soft.into())
-        };
+            let files_style = if self.app.show_files {
+                Style::default()
+                    .fg(self.app.current_theme.key_highlight.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.app.current_theme.border_style_soft.into())
+            };
+            let hidden_style = if self.app.show_hidden {
+                Style::default()
+                    .fg(self.app.current_theme.key_highlight.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.app.current_theme.border_style_soft.into())
+            };
 
-        let guide_line = Line::from(vec![
-            Span::raw(LEFT_PAD),
-            Span::styled("Space", key_style),
-            Span::styled(" History  ", label_style),
-            Span::styled("Tab", key_style),
-            Span::styled(" Mode  ", label_style),
-            Span::styled("↑/↓/→/←", key_style),
-            Span::styled(" Move  ", label_style),
-            Span::styled("f", key_style),
-            Span::styled(" Files  ", files_style),
-            Span::styled("a", key_style),
-            Span::styled(" All  ", hidden_style),
-            Span::styled("Enter", key_style),
-            Span::styled(" Select  ", label_style),
-            Span::styled("q/Esc", key_style),
-            Span::styled(" Quit", label_style),
-        ]);
+            Line::from(vec![
+                Span::raw(LEFT_PAD),
+                Span::styled("Space", key_style),
+                Span::styled(" History  ", label_style),
+                Span::styled("Tab", key_style),
+                Span::styled(" Mode  ", label_style),
+                Span::styled("↑/↓/→/←", key_style),
+                Span::styled(" Move  ", label_style),
+                Span::styled("f", key_style),
+                Span::styled(" Find  ", label_style),
+                Span::styled("v", key_style),
+                Span::styled(" Files  ", files_style),
+                Span::styled("a", key_style),
+                Span::styled(" All  ", hidden_style),
+                Span::styled("Enter", key_style),
+                Span::styled(" Select  ", label_style),
+                Span::styled("q/Esc", key_style),
+                Span::styled(" Quit", label_style),
+            ])
+        };
 
         self.render_guide(guide_area, guide_line, buf);
     }
@@ -297,5 +430,94 @@ impl<'a> TreeWidget<'a> {
 
         let guide = Paragraph::new(vec![guide_line]).wrap(Wrap { trim: false });
         guide.render(guide_inner, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_spans_splits_matched_substrings() {
+        let style = Style::default();
+        let match_style = Style::default().fg(Color::Yellow);
+        let spans = TreeWidget::name_spans("ReadMe", "ad", style, match_style);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "Re");
+        assert_eq!(spans[1].content.as_ref(), "ad");
+        assert_eq!(spans[2].content.as_ref(), "Me");
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn name_spans_without_query_is_a_single_span() {
+        let style = Style::default().fg(Color::White);
+        let match_style = Style::default().fg(Color::Yellow);
+        let spans = TreeWidget::name_spans("src", "", style, match_style);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "src");
+        assert_eq!(spans[0].style.fg, Some(Color::White));
+    }
+
+    #[test]
+    fn name_spans_without_match_keeps_name_style() {
+        let style = Style::default().fg(Color::White);
+        let match_style = Style::default().fg(Color::Yellow);
+        let spans = TreeWidget::name_spans("src", "zzz", style, match_style);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "src");
+        assert_eq!(spans[0].style.fg, Some(Color::White));
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn search_field_pads_empty_query_to_form_width() {
+        let contents = TreeWidget::search_field_contents("", 12);
+        assert_eq!(contents, "_           ");
+        assert_eq!(contents.chars().count(), 12);
+    }
+
+    #[test]
+    fn search_field_keeps_cursor_after_query() {
+        let contents = TreeWidget::search_field_contents("src", 12);
+        assert_eq!(contents, "src_        ");
+    }
+
+    #[test]
+    fn search_field_keeps_the_tail_of_a_long_query() {
+        let contents = TreeWidget::search_field_contents("abcdefghijklmnop", 8);
+        assert_eq!(contents, "jklmnop_");
+    }
+
+    #[test]
+    fn search_form_line_wraps_the_field_in_brackets() {
+        let line = TreeWidget::search_form_line(
+            "src",
+            12,
+            Style::default(),
+            Style::default().fg(Color::Yellow),
+        );
+        assert_eq!(line_text(&line), " Find [src_        ] ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn search_form_title_is_right_aligned() {
+        use ratatui::layout::Alignment;
+        let line = TreeWidget::search_form_title("src", 80, Style::default(), Style::default());
+        assert_eq!(line.alignment, Some(Alignment::Right));
+        assert!(line_text(&line).starts_with(" Find ["));
+        assert!(line_text(&line).contains("src_"));
+    }
+
+    #[test]
+    fn search_field_width_is_stable_on_normal_terminals() {
+        assert_eq!(TreeWidget::search_field_width(80), SEARCH_FIELD_WIDTH);
+        assert_eq!(TreeWidget::search_field_width(40), SEARCH_FIELD_WIDTH);
+        // 24 - 2 (corners) - 9 (left title) - 2 (gap) - 9 (chrome) = 2, clamped to 4
+        assert_eq!(TreeWidget::search_field_width(24), 4);
     }
 }

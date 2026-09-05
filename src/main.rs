@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -220,6 +222,23 @@ where
                         }
                         _ => {}
                     }
+                } else if app.search_mode {
+                    match key.code {
+                        KeyCode::Esc => app.exit_search(),
+                        KeyCode::Backspace | KeyCode::Delete => app.search_backspace(),
+                        KeyCode::Tab => app.mode.toggle(),
+                        KeyCode::Up => app.move_selection(-1),
+                        KeyCode::Down => app.move_selection(1),
+                        KeyCode::Right => app.expand_current(),
+                        KeyCode::Left => app.on_left(),
+                        KeyCode::Enter => {
+                            if let Some(result) = app.record_and_get_path() {
+                                return Ok(Some(result));
+                            }
+                        }
+                        KeyCode::Char(c) if !c.is_control() => app.search_input(c),
+                        _ => {}
+                    }
                 } else {
                     match key.code {
                         KeyCode::Char(' ') => {
@@ -227,7 +246,8 @@ where
                         }
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                         KeyCode::Tab => app.mode.toggle(),
-                        KeyCode::Char('f') => app.toggle_show_files(),
+                        KeyCode::Char('f') => app.start_search(),
+                        KeyCode::Char('v') => app.toggle_show_files(),
                         KeyCode::Char('a') => app.toggle_show_hidden(),
                         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
@@ -255,15 +275,12 @@ where
                 }
             }
             Event::Mouse(mouse) => {
-                let area: Rect = terminal
-                    .size()
-                    .map_err(io::Error::other)?
-                    .into();
+                let area: Rect = terminal.size().map_err(io::Error::other)?.into();
                 let list_area = list_content_area(area);
 
                 // Ignore clicks outside the list region.
-                let in_list = mouse.row >= list_area.top()
-                    && mouse.row < list_area.top() + list_area.height;
+                let in_list =
+                    mouse.row >= list_area.top() && mouse.row < list_area.top() + list_area.height;
 
                 match mouse.kind {
                     MouseEventKind::ScrollUp if in_list => {
@@ -294,15 +311,13 @@ where
                                 continue;
                             }
                             app.history_list_state.select(Some(idx));
-                            let clicked_path =
-                                app.history.entries[idx].path.clone();
+                            let clicked_path = app.history.entries[idx].path.clone();
                             let now = Instant::now();
                             let is_double = last_click
                                 .as_ref()
                                 .map(|(p, t)| {
                                     *p == clicked_path
-                                        && now.duration_since(*t).as_millis()
-                                            < DOUBLE_CLICK_MS
+                                        && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
                                 })
                                 .unwrap_or(false);
                             if is_double {
@@ -327,8 +342,7 @@ where
                                 .as_ref()
                                 .map(|(p, t)| {
                                     *p == clicked_path
-                                        && now.duration_since(*t).as_millis()
-                                            < DOUBLE_CLICK_MS
+                                        && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
                                 })
                                 .unwrap_or(false);
 

@@ -19,6 +19,7 @@ A simple CLI tool to navigate directories with a tree view, similar to `tree` bu
 
 - Tree-like view starting at your home directory, auto-expanded to the current directory.
 - Navigate using arrow keys (`Up`, `Down`, `Left`, `Right`).
+- Press `f` to highlight partial name matches in currently visible files and folders (Esc to exit).
 - Enter to select a directory (files are ignored).
 - Shell integration to change the parent directory.
 - Broot-style automatic configuration.
@@ -89,7 +90,8 @@ cdtree
 - **Left**: Collapse directory or go to parent.
 - **Enter**: Change to the selected directory (only when a directory is selected).
 - **Space**: Toggle history mode. Select from recently visited directories.
-- **f**: Toggle file visibility.
+- **f**: Search file/folder names. A search box appears at the top-right; partial matches in currently visible rows are highlighted (case-insensitive). Esc exits search.
+- **v**: Toggle file visibility.
 - **a**: Toggle hidden file visibility.
 - **t**: (Tap) Change color theme randomly. (Double-tap) Reset theme.
 - **q / Esc**: Quit.
