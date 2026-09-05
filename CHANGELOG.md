@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-09-05
 
 ### Added
 - `f` enters name search mode and highlights case-insensitive partial matches in currently visible file/folder names
@@ -9,6 +9,10 @@
 
 ### Changed
 - File visibility toggle moved from `f` to `v`
+
+### Fixed
+- Search field truncation uses terminal display width so CJK queries do not overflow the title
+- Name matching case-folds expanding characters such as `ß`
 
 ## [0.2.0] - 2026-07-03
 
