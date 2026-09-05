@@ -8,6 +8,7 @@ use ratatui::{
         Block, BorderType, Borders, List, ListItem, Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Preferred inner width of the top-right search field (excluding brackets).
 const SEARCH_FIELD_WIDTH: usize = 16;
@@ -121,16 +122,32 @@ impl<'a> TreeWidget<'a> {
         available.clamp(4, SEARCH_FIELD_WIDTH)
     }
 
+    /// Suffix of `s` whose terminal display width is at most `max_width`.
+    fn suffix_for_width(s: &str, max_width: usize) -> &str {
+        if UnicodeWidthStr::width(s) <= max_width {
+            return s;
+        }
+        let mut width = 0;
+        let mut start = s.len();
+        for (i, ch) in s.char_indices().rev() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + w > max_width {
+                break;
+            }
+            width += w;
+            start = i;
+        }
+        &s[start..]
+    }
+
     /// Visible contents of the search field, with a trailing cursor and right padding.
+    ///
+    /// `field_width` and truncation are in terminal columns, not Unicode scalar counts,
+    /// so CJK / emoji queries do not overflow the right-aligned form.
     fn search_field_contents(query: &str, field_width: usize) -> String {
         let budget = field_width.saturating_sub(1);
-        let visible = if query.chars().count() <= budget {
-            query.to_string()
-        } else {
-            let skip = query.chars().count() - budget;
-            query.chars().skip(skip).collect()
-        };
-        let used = visible.chars().count() + 1;
+        let visible = Self::suffix_for_width(query, budget);
+        let used = UnicodeWidthStr::width(visible) + 1;
         let pad = field_width.saturating_sub(used);
         format!("{visible}_{}", " ".repeat(pad))
     }
@@ -490,6 +507,15 @@ mod tests {
     fn search_field_keeps_the_tail_of_a_long_query() {
         let contents = TreeWidget::search_field_contents("abcdefghijklmnop", 8);
         assert_eq!(contents, "jklmnop_");
+    }
+
+    #[test]
+    fn search_field_truncates_cjk_by_display_width() {
+        // 10 CJK chars = 20 columns; field 16 leaves 15 for the query suffix.
+        let contents = TreeWidget::search_field_contents("あいうえおかきくけこ", 16);
+        assert_eq!(UnicodeWidthStr::width(contents.as_str()), 16);
+        assert_eq!(contents, "えおかきくけこ_ ");
+        assert!(!contents.contains('あ'));
     }
 
     #[test]

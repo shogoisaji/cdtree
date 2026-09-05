@@ -175,33 +175,33 @@ impl FileNode {
 
 /// Byte ranges `[start, end)` in `name` that match `query` (case-insensitive,
 /// non-overlapping). An empty query yields no ranges so nothing is highlighted.
+///
+/// Both sides are Unicode-uppercased so expanding characters still match
+/// (for example `ß` → `SS`), while returned ranges stay on the original UTF-8
+/// byte indices for highlighting.
 pub(crate) fn name_match_ranges(name: &str, query: &str) -> Vec<(usize, usize)> {
     if query.is_empty() {
         return Vec::new();
     }
 
-    let name_chars: Vec<(usize, char)> = name.char_indices().collect();
-    let query_chars: Vec<char> = query.chars().collect();
-    let qlen = query_chars.len();
-    if name_chars.len() < qlen {
+    let (name_folded, name_map) = fold_with_orig_ranges(name);
+    let query_folded: Vec<char> = query.chars().flat_map(char::to_uppercase).collect();
+    let qlen = query_folded.len();
+    if qlen == 0 || name_folded.len() < qlen {
         return Vec::new();
     }
 
     let mut ranges = Vec::new();
     let mut i = 0;
-    while i + qlen <= name_chars.len() {
-        let is_match = name_chars[i..i + qlen]
-            .iter()
-            .zip(query_chars.iter())
-            .all(|((_, n), q)| chars_eq_ignore_case(*n, *q));
-        if is_match {
-            let start = name_chars[i].0;
-            let end = name_chars
-                .get(i + qlen)
-                .map(|(idx, _)| *idx)
-                .unwrap_or(name.len());
+    while i + qlen <= name_folded.len() {
+        if name_folded[i..i + qlen] == query_folded {
+            let start = name_map[i].0;
+            let end = name_map[i + qlen - 1].1;
             ranges.push((start, end));
             i += qlen;
+            while i < name_map.len() && name_map[i].0 < end {
+                i += 1;
+            }
         } else {
             i += 1;
         }
@@ -209,8 +209,18 @@ pub(crate) fn name_match_ranges(name: &str, query: &str) -> Vec<(usize, usize)> 
     ranges
 }
 
-fn chars_eq_ignore_case(a: char, b: char) -> bool {
-    a == b || a.to_lowercase().eq(b.to_lowercase())
+/// Uppercase `s` and, for each produced character, the original byte range it came from.
+fn fold_with_orig_ranges(s: &str) -> (Vec<char>, Vec<(usize, usize)>) {
+    let mut folded = Vec::new();
+    let mut map = Vec::new();
+    for (byte_idx, ch) in s.char_indices() {
+        let byte_end = byte_idx + ch.len_utf8();
+        for uc in ch.to_uppercase() {
+            folded.push(uc);
+            map.push((byte_idx, byte_end));
+        }
+    }
+    (folded, map)
 }
 
 pub struct App {
@@ -1501,6 +1511,22 @@ mod tests {
         // フ(0..3) ァ(3..6) イ(6..9) ル(9..12)
         assert_eq!(name_match_ranges("ファイル", "ァイ"), vec![(3, 9)]);
         assert_eq!(name_match_ranges("ファイル", "file"), Vec::new());
+    }
+
+    #[test]
+    fn name_match_ranges_case_folds_expanding_characters() {
+        // ß uppercases to "SS", so STRASSE / strasse match the whole name.
+        assert_eq!(
+            name_match_ranges("Straße", "STRASSE"),
+            vec![(0, "Straße".len())]
+        );
+        assert_eq!(
+            name_match_ranges("Straße", "strasse"),
+            vec![(0, "Straße".len())]
+        );
+        // "ss" / "SS" maps back onto the original ß (bytes 4..6).
+        assert_eq!(name_match_ranges("Straße", "ss"), vec![(4, 6)]);
+        assert_eq!(name_match_ranges("Straße", "SS"), vec![(4, 6)]);
     }
 }
 
