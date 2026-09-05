@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `f` enters name search mode and highlights case-insensitive partial matches in currently visible file/folder names
+- Title bar shows a right-aligned `Find [query_]` input on the top border while searching
+- `Esc` exits search and returns to normal navigation (`q` / letters type into the query)
+
+### Changed
+- File visibility toggle moved from `f` to `v`
+
 ## [0.2.0] - 2026-07-03
 
 ### Added

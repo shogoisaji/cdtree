@@ -173,6 +173,56 @@ impl FileNode {
     }
 }
 
+/// Byte ranges `[start, end)` in `name` that match `query` (case-insensitive,
+/// non-overlapping). An empty query yields no ranges so nothing is highlighted.
+///
+/// Both sides are Unicode-uppercased so expanding characters still match
+/// (for example `ß` → `SS`), while returned ranges stay on the original UTF-8
+/// byte indices for highlighting.
+pub(crate) fn name_match_ranges(name: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let (name_folded, name_map) = fold_with_orig_ranges(name);
+    let query_folded: Vec<char> = query.chars().flat_map(char::to_uppercase).collect();
+    let qlen = query_folded.len();
+    if qlen == 0 || name_folded.len() < qlen {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + qlen <= name_folded.len() {
+        if name_folded[i..i + qlen] == query_folded {
+            let start = name_map[i].0;
+            let end = name_map[i + qlen - 1].1;
+            ranges.push((start, end));
+            i += qlen;
+            while i < name_map.len() && name_map[i].0 < end {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
+/// Uppercase `s` and, for each produced character, the original byte range it came from.
+fn fold_with_orig_ranges(s: &str) -> (Vec<char>, Vec<(usize, usize)>) {
+    let mut folded = Vec::new();
+    let mut map = Vec::new();
+    for (byte_idx, ch) in s.char_indices() {
+        let byte_end = byte_idx + ch.len_utf8();
+        for uc in ch.to_uppercase() {
+            folded.push(uc);
+            map.push((byte_idx, byte_end));
+        }
+    }
+    (folded, map)
+}
+
 pub struct App {
     pub root: FileNode,
     pub selected_path: PathBuf,
@@ -188,6 +238,8 @@ pub struct App {
     pub history: History,
     pub history_list_state: ListState,
     pub home_dir: PathBuf,
+    pub search_mode: bool,
+    pub search_query: String,
 }
 
 impl App {
@@ -225,6 +277,8 @@ impl App {
             history_mode: false,
             history,
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: home_dir.clone(),
         };
 
@@ -538,6 +592,28 @@ impl App {
         self.refresh_after_toggle();
     }
 
+    /// Enter name-search mode with an empty query.
+    ///
+    /// Highlights apply to currently visible rows only (collapsed / not-yet-loaded
+    /// children are not searched). Matching is case-insensitive.
+    pub fn start_search(&mut self) {
+        self.search_mode = true;
+        self.search_query.clear();
+    }
+
+    pub fn exit_search(&mut self) {
+        self.search_mode = false;
+        self.search_query.clear();
+    }
+
+    pub fn search_input(&mut self, c: char) {
+        self.search_query.push(c);
+    }
+
+    pub fn search_backspace(&mut self) {
+        self.search_query.pop();
+    }
+
     fn refresh_after_toggle(&mut self) {
         Self::clear_child_count_cache(&mut self.root);
         self.reload_all();
@@ -702,6 +778,8 @@ mod tests {
             history_mode: false,
             history: History::default(),
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: PathBuf::from("/root"),
         }
     }
@@ -808,6 +886,8 @@ mod tests {
             history_mode: false,
             history: History::default(),
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: root.clone(),
         };
 
@@ -851,6 +931,8 @@ mod tests {
             history_mode: false,
             history: History::default(),
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: root.clone(),
         };
 
@@ -888,6 +970,8 @@ mod tests {
             history_mode: false,
             history: History::default(),
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: root.clone(),
         };
 
@@ -960,9 +1044,17 @@ mod tests {
     fn toggle_current_collapses_expanded_dir() {
         let mut app = sample_app();
         app.selected_path = PathBuf::from("/root/a");
-        assert!(App::find_node(&app.root, Path::new("/root/a")).unwrap().expanded);
+        assert!(
+            App::find_node(&app.root, Path::new("/root/a"))
+                .unwrap()
+                .expanded
+        );
         app.toggle_current();
-        assert!(!App::find_node(&app.root, Path::new("/root/a")).unwrap().expanded);
+        assert!(
+            !App::find_node(&app.root, Path::new("/root/a"))
+                .unwrap()
+                .expanded
+        );
     }
 
     #[test]
@@ -973,9 +1065,17 @@ mod tests {
             children[1].children = Some(vec![]);
         }
         app.selected_path = PathBuf::from("/root/b");
-        assert!(!App::find_node(&app.root, Path::new("/root/b")).unwrap().expanded);
+        assert!(
+            !App::find_node(&app.root, Path::new("/root/b"))
+                .unwrap()
+                .expanded
+        );
         app.toggle_current();
-        assert!(App::find_node(&app.root, Path::new("/root/b")).unwrap().expanded);
+        assert!(
+            App::find_node(&app.root, Path::new("/root/b"))
+                .unwrap()
+                .expanded
+        );
     }
 
     #[test]
@@ -1073,6 +1173,8 @@ mod tests {
             history_mode: false,
             history: History::default(),
             history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
             home_dir: root.clone(),
         };
 
@@ -1346,6 +1448,85 @@ mod tests {
         assert_eq!(app.root.path, canonical_home);
         assert_eq!(app.selected_path, canonical_home);
         assert_eq!(app.startup_path, canonical_outside);
+    }
+
+    #[test]
+    fn start_search_enters_mode_with_empty_query() {
+        let mut app = sample_app();
+        app.search_query = "stale".to_string();
+        app.start_search();
+        assert!(app.search_mode);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn search_input_and_backspace() {
+        let mut app = sample_app();
+        app.start_search();
+        app.search_input('F');
+        app.search_input('o');
+        assert_eq!(app.search_query, "Fo");
+        app.search_backspace();
+        assert_eq!(app.search_query, "F");
+        app.search_backspace();
+        app.search_backspace();
+        assert!(app.search_query.is_empty());
+        assert!(app.search_mode);
+    }
+
+    #[test]
+    fn exit_search_clears_query_and_mode() {
+        let mut app = sample_app();
+        app.start_search();
+        app.search_input('x');
+        app.exit_search();
+        assert!(!app.search_mode);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn name_match_ranges_empty_query_has_no_highlights() {
+        assert!(name_match_ranges("ReadMe.md", "").is_empty());
+    }
+
+    #[test]
+    fn name_match_ranges_is_case_insensitive() {
+        assert_eq!(name_match_ranges("ReadMe.md", "readme"), vec![(0, 6)]);
+        assert_eq!(name_match_ranges("ReadMe.md", "MD"), vec![(7, 9)]);
+        assert_eq!(name_match_ranges("FooBar", "o"), vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn name_match_ranges_finds_non_overlapping_substrings() {
+        assert_eq!(
+            name_match_ranges("ababab", "ab"),
+            vec![(0, 2), (2, 4), (4, 6)]
+        );
+        assert!(name_match_ranges("foo", "bar").is_empty());
+        assert!(name_match_ranges("ab", "abcdef").is_empty());
+    }
+
+    #[test]
+    fn name_match_ranges_handles_multibyte_names() {
+        // フ(0..3) ァ(3..6) イ(6..9) ル(9..12)
+        assert_eq!(name_match_ranges("ファイル", "ァイ"), vec![(3, 9)]);
+        assert_eq!(name_match_ranges("ファイル", "file"), Vec::new());
+    }
+
+    #[test]
+    fn name_match_ranges_case_folds_expanding_characters() {
+        // ß uppercases to "SS", so STRASSE / strasse match the whole name.
+        assert_eq!(
+            name_match_ranges("Straße", "STRASSE"),
+            vec![(0, "Straße".len())]
+        );
+        assert_eq!(
+            name_match_ranges("Straße", "strasse"),
+            vec![(0, "Straße".len())]
+        );
+        // "ss" / "SS" maps back onto the original ß (bytes 4..6).
+        assert_eq!(name_match_ranges("Straße", "ss"), vec![(4, 6)]);
+        assert_eq!(name_match_ranges("Straße", "SS"), vec![(4, 6)]);
     }
 }
 
