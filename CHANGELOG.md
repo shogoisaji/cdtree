@@ -10,6 +10,7 @@
 
 ### Fixed
 - Returning to an earlier query after editing no longer treats an unfinished search snapshot as a completed result
+- Leaving search with Esc or clearing the query preserves the selected result even when the live root was collapsed before searching
 
 ## [0.3.0] - 2026-09-05
 

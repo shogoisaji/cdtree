@@ -886,6 +886,9 @@ impl App {
         self.search_truncated = false;
         self.search_phase = SearchPhase::Idle;
         self.search_follow_best = true;
+        if selected != self.root.path && selected.starts_with(&self.root.path) {
+            Self::expand_dir(&mut self.root, self.show_files, self.show_hidden);
+        }
         self.expand_to_path(selected.as_path());
         self.selected_path = selected;
         self.ensure_valid_selection();
@@ -2058,6 +2061,80 @@ mod tests {
         assert!(app.search_query.is_empty());
         assert!(!app.search_view_active());
         assert!(visible_names(&app).iter().any(|name| name == "skip"));
+    }
+
+    fn search_from_collapsed_live_root(root: &Path) -> App {
+        let target = root.join("keep/target");
+        create_dir(&target);
+        let mut app = app_at(root);
+        // A mouse click selects and toggles the root before entering search.
+        app.select_visible_index(0);
+        app.toggle_current();
+        assert!(!app.root.expanded);
+        app.start_search();
+        for ch in "target".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+        assert_eq!(app.selected_path, target);
+        assert!(!app.root.expanded);
+        app
+    }
+
+    #[test]
+    fn exiting_search_preserves_selection_under_collapsed_live_root() {
+        let temp = TempDir::new("cdtree_search_exit_collapsed_root");
+        let mut app = search_from_collapsed_live_root(&temp.path);
+        app.exit_search();
+
+        assert_eq!(app.selected_path, temp.path.join("keep/target"));
+        assert!(app.root.expanded);
+        assert!(!app.search_mode);
+        assert!(!app.search_view_active());
+        let visible = app.get_visible_nodes();
+        assert_eq!(
+            visible[app.list_state.selected().unwrap()].1.path,
+            app.selected_path
+        );
+    }
+
+    #[test]
+    fn clearing_query_preserves_selection_under_collapsed_live_root() {
+        let temp = TempDir::new("cdtree_search_clear_collapsed_root");
+        let mut app = search_from_collapsed_live_root(&temp.path);
+        while !app.search_query.is_empty() {
+            app.search_backspace();
+        }
+
+        assert_eq!(app.selected_path, temp.path.join("keep/target"));
+        assert!(app.root.expanded);
+        assert!(app.search_mode);
+        assert!(!app.search_view_active());
+        let visible = app.get_visible_nodes();
+        assert_eq!(
+            visible[app.list_state.selected().unwrap()].1.path,
+            app.selected_path
+        );
+    }
+
+    #[test]
+    fn leaving_search_with_root_selected_keeps_live_root_collapsed() {
+        let temp = TempDir::new("cdtree_search_keep_root_collapsed");
+        for clear_query in [false, true] {
+            let mut app = search_from_collapsed_live_root(&temp.path);
+            app.select_visible_index(0);
+            if clear_query {
+                while !app.search_query.is_empty() {
+                    app.search_backspace();
+                }
+            } else {
+                app.exit_search();
+            }
+            assert_eq!(app.selected_path, temp.path);
+            assert!(!app.root.expanded);
+            assert_eq!(app.get_visible_nodes().len(), 1);
+            assert_eq!(app.list_state.selected(), Some(0));
+        }
     }
 
     #[test]
