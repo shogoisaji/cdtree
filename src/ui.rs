@@ -1,4 +1,5 @@
-use crate::app::{App, FileNode, name_match_ranges};
+use crate::app::{App, FileNode};
+use crate::search::fuzzy_match_ranges;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -196,7 +197,7 @@ impl<'a> TreeWidget<'a> {
         name_style: Style,
         match_style: Style,
     ) -> Vec<Span<'static>> {
-        let ranges = name_match_ranges(name, query);
+        let ranges = fuzzy_match_ranges(name, query).unwrap_or_default();
         if ranges.is_empty() {
             return vec![Span::styled(name.to_string(), name_style)];
         }
@@ -241,8 +242,13 @@ impl<'a> TreeWidget<'a> {
         let label_style = Style::default().fg(self.app.current_theme.border_style_soft.into());
 
         // Pre-load lightweight child counts only for rows that can be drawn.
-        self.app
-            .ensure_visible_child_counts(self.app.list_state.offset(), tree_area.height as usize);
+        // Search rows are a filtered snapshot and already carry their children.
+        if !self.app.search_view_active() {
+            self.app.ensure_visible_child_counts(
+                self.app.list_state.offset(),
+                tree_area.height as usize,
+            );
+        }
 
         let items = {
             let visible_nodes = self.app.get_visible_nodes();
@@ -252,43 +258,65 @@ impl<'a> TreeWidget<'a> {
                 let display_name = Self::display_name(node);
                 let name_style = Self::name_style(self.app, node, is_selected);
                 let prefix = prefix.clone();
-                let query = if self.app.search_mode {
-                    self.app.search_query.as_str()
-                } else {
+                // The tree root is the anchor, not a hit, even when its name matches.
+                let query = if node.path == self.app.root.path {
                     ""
+                } else {
+                    self.app.search_highlight_query()
                 };
 
+                let gutter = if is_selected && self.app.search_mode {
+                    "> "
+                } else {
+                    LEFT_PAD
+                };
                 let mut spans = vec![
-                    Span::raw(LEFT_PAD),
+                    Span::styled(
+                        gutter,
+                        if is_selected && self.app.search_mode {
+                            Style::default()
+                                .fg(self.app.current_theme.key_highlight.into())
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        },
+                    ),
                     Span::styled(
                         prefix,
                         Style::default().fg(self.app.current_theme.branch_color.into()),
                     ),
                 ];
+                // On the selected row the cursor color stays intact and the match
+                // is underlined. Other hits keep the yellow marker.
+                let match_style = if is_selected {
+                    name_style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Self::search_match_style()
+                };
                 spans.extend(Self::name_spans(
                     &display_name,
                     query,
                     name_style,
-                    Self::search_match_style(),
+                    match_style,
                 ));
 
-                if node.is_dir {
-                    if let Some((dirs, files)) = node.child_counts() {
-                        let count_style =
-                            Style::default().fg(self.app.current_theme.border_fg.into());
-                        let mut count_parts = Vec::new();
-                        if dirs > 0 {
-                            count_parts.push(format!("📂{}", dirs));
-                        }
-                        if files > 0 {
-                            count_parts.push(format!("📄{}", files));
-                        }
-                        if !count_parts.is_empty() {
-                            spans.push(Span::styled(
-                                format!(" {}", count_parts.join(" ")),
-                                count_style,
-                            ));
-                        }
+                if node.is_dir
+                    && !self.app.search_view_active()
+                    && let Some((dirs, files)) = node.child_counts()
+                {
+                    let count_style = Style::default().fg(self.app.current_theme.border_fg.into());
+                    let mut count_parts = Vec::new();
+                    if dirs > 0 {
+                        count_parts.push(format!("📂{}", dirs));
+                    }
+                    if files > 0 {
+                        count_parts.push(format!("📄{}", files));
+                    }
+                    if !count_parts.is_empty() {
+                        spans.push(Span::styled(
+                            format!(" {}", count_parts.join(" ")),
+                            count_style,
+                        ));
                     }
                 }
 
@@ -309,15 +337,25 @@ impl<'a> TreeWidget<'a> {
         StatefulWidget::render(list, tree_area, buf, &mut self.app.list_state);
 
         let guide_line = if self.app.search_mode {
-            Line::from(vec![
-                Span::raw(LEFT_PAD),
+            // Status comes first so it stays visible when the guide wraps.
+            let mut spans = vec![Span::raw(LEFT_PAD)];
+            let status = self.app.search_status();
+            if !status.is_empty() {
+                let status_style = Style::default()
+                    .fg(self.app.current_theme.key_highlight.into())
+                    .add_modifier(Modifier::BOLD);
+                spans.push(Span::styled(status, status_style));
+                spans.push(Span::raw("  "));
+            }
+            spans.extend([
                 Span::styled("Esc", key_style),
                 Span::styled(" Exit  ", label_style),
                 Span::styled("Enter", key_style),
                 Span::styled(" Select  ", label_style),
                 Span::styled("↑/↓/→/←", key_style),
                 Span::styled(" Move", label_style),
-            ])
+            ]);
+            Line::from(spans)
         } else {
             let files_style = if self.app.show_files {
                 Style::default()
@@ -474,6 +512,23 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "src");
         assert_eq!(spans[0].style.fg, Some(Color::White));
+    }
+
+    #[test]
+    fn name_spans_highlights_a_contiguous_match() {
+        let style = Style::default();
+        let match_style = Style::default().fg(Color::Yellow);
+        let spans = TreeWidget::name_spans("Desktop", "esk", style, match_style);
+        let text: Vec<_> = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, vec!["D", "esk", "top"]);
+        assert_eq!(spans[0].style.fg, None);
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[2].style.fg, None);
+
+        let missed = TreeWidget::name_spans("ZBXC", "abc", style, match_style);
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0].content.as_ref(), "ZBXC");
+        assert_eq!(missed[0].style.fg, None);
     }
 
     #[test]

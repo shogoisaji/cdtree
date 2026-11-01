@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `f` searches directory names under the tree root for a continuous, case-insensitive substring after typing pauses (`abc` matches `XabcY` and not `ZBXC`), then shows matches as an expanded tree (ancestors stay visible, other entries are hidden) with matched characters highlighted
+- Search hits appear as soon as they are found. The walk continues in the background, and the match count keeps updating until it finishes
+- Search advances during navigation events and yields between filesystem operations after a short time slice, including inside large directories
+- Partial results are labeled even with zero matches, including depth-limit omissions and directory read errors
+
+### Fixed
+- Returning to an earlier query after editing no longer treats an unfinished search snapshot as a completed result
+- Leaving search with Esc or clearing the query preserves the selected result even when the live root was collapsed before searching
+
 ## [0.3.0] - 2026-09-05
 
 ### Added

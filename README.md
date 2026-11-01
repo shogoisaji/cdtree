@@ -19,7 +19,8 @@ A simple CLI tool to navigate directories with a tree view, similar to `tree` bu
 
 - Tree-like view starting at your home directory, auto-expanded to the current directory.
 - Navigate using arrow keys (`Up`, `Down`, `Left`, `Right`).
-- Press `f` to highlight partial name matches in currently visible files and folders (Esc to exit).
+- Press `f` to search directory names under the tree. The query has to appear as a continuous, case-insensitive run of characters (`abc` matches `XabcY`, not `ZBXC`). After typing pauses, matches appear as they are found, as an expanded tree with other entries hidden (Esc to exit). The rest of the tree keeps being searched in the background.
+- Search continues while you navigate, in short time slices. `partial` means some directories remain unsearched because of scan limits or read errors; `No matches (partial search)` does not rule out matches in those directories.
 - Enter to select a directory (files are ignored).
 - Shell integration to change the parent directory.
 - Broot-style automatic configuration.
@@ -90,7 +91,7 @@ cdtree
 - **Left**: Collapse directory or go to parent.
 - **Enter**: Change to the selected directory (only when a directory is selected).
 - **Space**: Toggle history mode. Select from recently visited directories.
-- **f**: Search file/folder names. A search box appears at the top-right; partial matches in currently visible rows are highlighted (case-insensitive). Esc exits search.
+- **f**: Fuzzy-search directory names under the tree root. After a short pause in typing, matches are listed as an expanded tree (ancestors included, everything else hidden) with the matched characters highlighted. Esc exits search.
 - **v**: Toggle file visibility.
 - **a**: Toggle hidden file visibility.
 - **t**: (Tap) Change color theme randomly. (Double-tap) Reset theme.

@@ -63,7 +63,10 @@ impl History {
 
     fn history_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        Path::new(&home).join(".config").join("cdtree").join("history.json")
+        Path::new(&home)
+            .join(".config")
+            .join("cdtree")
+            .join("history.json")
     }
 }
 
