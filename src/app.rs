@@ -807,6 +807,16 @@ impl App {
     }
 
     fn publish_search_matches(&mut self, matches: &[PathBuf], truncated: bool, complete: bool) {
+        // Keep a user-chosen row visible until the new walk reaches its branch
+        // or finishes and confirms that the row is no longer in the results.
+        if !complete
+            && !self.search_follow_best
+            && !matches
+                .iter()
+                .any(|path| path.starts_with(&self.selected_path))
+        {
+            return;
+        }
         self.search_tree = Some(build_match_tree(self.root.path.as_path(), matches));
         self.search_applied = self.search_query.clone();
         self.search_applied_complete = complete;
@@ -2307,12 +2317,36 @@ mod tests {
             root.join("nested").join("mid").join("Desktop")
         );
         app.search_backspace();
+        // The first slice finds only the shallow hit. The selected deeper hit
+        // must not be discarded before the new walk reaches its branch.
+        assert!(!app.advance_search_for_test(1));
+        assert_eq!(app.selected_path, root.join("nested/mid/Desktop"));
         app.finish_search_for_test();
         assert_eq!(app.search_query, "des");
         assert_eq!(
             app.selected_path,
             root.join("nested").join("mid").join("Desktop")
         );
+    }
+
+    #[test]
+    fn completed_search_replaces_a_selection_excluded_by_the_new_query() {
+        let temp = TempDir::new("cdtree_search_excluded_selection");
+        create_dir(&temp.path.join("target"));
+        create_dir(&temp.path.join("targetx"));
+        let mut app = app_at(&temp.path);
+        app.start_search();
+        for ch in "target".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+        app.select_visible_index(1);
+        assert_eq!(app.selected_path, temp.path.join("target"));
+        app.search_input('x');
+        assert!(!app.advance_search_for_test(1));
+        app.finish_search_for_test();
+        assert_eq!(app.selected_path, temp.path.join("targetx"));
+        assert_eq!(app.search_status(), "1 match");
     }
 
     fn render_screen(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {

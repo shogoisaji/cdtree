@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-11-01
 
 ### Changed
 - `f` searches directory names under the tree root for a continuous, case-insensitive substring after typing pauses (`abc` matches `XabcY` and not `ZBXC`), then shows matches as an expanded tree (ancestors stay visible, other entries are hidden) with matched characters highlighted
@@ -10,6 +10,7 @@
 
 ### Fixed
 - Returning to an earlier query after editing no longer treats an unfinished search snapshot as a completed result
+- A user-selected deep result stays selected while a revised query is still scanning shallower branches
 - Leaving search with Esc or clearing the query preserves the selected result even when the live root was collapsed before searching
 
 ## [0.3.0] - 2026-09-05
