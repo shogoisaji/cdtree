@@ -55,16 +55,14 @@ fi
     )
 }
 
-fn print_manual_setup_instructions(target_file: Option<&Path>, launcher_path: &Path, error: &io::Error) {
+fn print_manual_setup_instructions(
+    target_file: Option<&Path>,
+    launcher_path: &Path,
+    error: &io::Error,
+) {
     if let Some(target_file) = target_file {
-        eprintln!(
-            "Could not update {:?}: {}.",
-            target_file,
-            error
-        );
-        eprintln!(
-            "Your shell rc file may be managed by another tool such as Home Manager or Nix."
-        );
+        eprintln!("Could not update {:?}: {}.", target_file, error);
+        eprintln!("Your shell rc file may be managed by another tool such as Home Manager or Nix.");
     } else {
         eprintln!("Could not find .zshrc or .bashrc.");
     }
@@ -247,7 +245,11 @@ function cdtree() {
     } else if bashrc.exists() {
         bashrc
     } else {
-        print_manual_setup_instructions(None, &launcher_path, &io::Error::from(io::ErrorKind::NotFound));
+        print_manual_setup_instructions(
+            None,
+            &launcher_path,
+            &io::Error::from(io::ErrorKind::NotFound),
+        );
         return Ok(());
     };
 

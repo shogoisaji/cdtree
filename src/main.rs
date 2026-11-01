@@ -11,7 +11,7 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // Command constants
 #[cfg(target_os = "macos")]
@@ -61,6 +61,7 @@ fn is_safe_cd_target(path: &str) -> bool {
 mod app;
 mod config;
 mod history;
+mod search;
 mod shell;
 #[cfg(test)]
 mod test_support;
@@ -179,7 +180,24 @@ fn print_install_required() {
 
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
+    app: App,
+) -> io::Result<Option<(String, app::AppMode)>>
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
+    run_app_with_events(terminal, app, |timeout| {
+        if event::poll(timeout)? {
+            event::read().map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+fn run_app_with_events<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
     mut app: App,
+    mut next_event: impl FnMut(std::time::Duration) -> io::Result<Option<Event>>,
 ) -> io::Result<Option<(String, app::AppMode)>>
 where
     <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
@@ -189,6 +207,9 @@ where
     const DOUBLE_CLICK_MS: u128 = 400;
 
     loop {
+        // Advance between events too, so a stream of arrows/mouse events cannot
+        // starve the search. Each slice also has a time budget.
+        app.poll_search();
         terminal
             .draw(|f| {
                 let ui = TreeWidget::new(&mut app);
@@ -196,11 +217,13 @@ where
             })
             .map_err(io::Error::other)?;
 
-        if !event::poll(Duration::from_millis(250))? {
+        // While a directory search is pending, wake early so the walk starts
+        // after typing pauses and then continues in short slices.
+        let Some(event) = next_event(app.search_poll_timeout())? else {
             continue;
-        }
+        };
 
-        match event::read()? {
+        match event {
             Event::Key(key) if key.kind == event::KeyEventKind::Press => {
                 if app.history_mode {
                     match key.code {
@@ -387,6 +410,58 @@ fn list_content_area(area: Rect) -> Rect {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn search_progresses_even_when_events_are_always_ready() {
+        use crate::test_support::{CurrentDirGuard, EnvGuard, env_lock};
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use std::fs;
+        use std::time::SystemTime;
+
+        let _lock = env_lock();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cdtree_event_search_{}_{unique}",
+            std::process::id()
+        ));
+        // More than one directory slice; the hit is in the last branch.
+        for i in 0..420 {
+            fs::create_dir_all(root.join(format!("a{i:03}"))).unwrap();
+        }
+        let target = root.join("z/needle");
+        fs::create_dir_all(&target).unwrap();
+        let result = {
+            let _home = EnvGuard::set("HOME", root.to_str().unwrap());
+            let _cwd = CurrentDirGuard::set(&root);
+            let mut app = App::new().unwrap();
+            app.mode = app::AppMode::Open;
+            app.start_search();
+            for ch in "needle".chars() {
+                app.search_input(ch);
+            }
+            std::thread::sleep(search::SEARCH_DEBOUNCE);
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut events = 0;
+            run_app_with_events(&mut terminal, app, |_| {
+                events += 1;
+                Ok(Some(if events <= 128 {
+                    Event::Resize(80, 24)
+                } else {
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                }))
+            })
+            .unwrap()
+        };
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            result,
+            Some((target.to_string_lossy().into_owned(), app::AppMode::Open))
+        );
+    }
 
     #[test]
     fn verify_cli() {

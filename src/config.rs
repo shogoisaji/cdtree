@@ -1,8 +1,8 @@
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RgbColor {
@@ -26,20 +26,20 @@ impl From<(u8, u8, u8)> for RgbColor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
     pub border_fg: RgbColor,
-    pub border_style: RgbColor, // Used for LIME in ui.rs
+    pub border_style: RgbColor,      // Used for LIME in ui.rs
     pub border_style_soft: RgbColor, // Used for LIME_SOFT in ui.rs
-    pub key_highlight: RgbColor, // ORANGE
-    pub branch_color: RgbColor, // BRANCH_BLUE
+    pub key_highlight: RgbColor,     // ORANGE
+    pub branch_color: RgbColor,      // BRANCH_BLUE
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            border_fg: (120, 230, 80).into(), // LIME
+            border_fg: (120, 230, 80).into(),        // LIME
             border_style: (120, 230, 80).into(), // LIME (reusing for simplicity based on ui.rs usage)
             border_style_soft: (90, 190, 70).into(), // LIME_SOFT
             key_highlight: (255, 160, 0).into(), // ORANGE
-            branch_color: (202, 93, 42).into(), // BRANCH_BLUE
+            branch_color: (202, 93, 42).into(),  // BRANCH_BLUE
         }
     }
 }
@@ -87,8 +87,9 @@ impl Config {
 
     fn get_config_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        Path::new(&home).join(".config").join("cdtree").join("config.json")
+        Path::new(&home)
+            .join(".config")
+            .join("cdtree")
+            .join("config.json")
     }
 }
-
-

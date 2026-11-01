@@ -1,12 +1,16 @@
 use crate::config::{Config, RgbColor, Theme};
 use crate::history::History;
+use crate::search::{
+    DIRS_PER_SLICE, SEARCH_DEBOUNCE, SearchPhase, SearchScan, fuzzy_match_ranges, fuzzy_match_score,
+};
 use rand::Rng;
 use ratatui::widgets::ListState;
 use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -173,56 +177,6 @@ impl FileNode {
     }
 }
 
-/// Byte ranges `[start, end)` in `name` that match `query` (case-insensitive,
-/// non-overlapping). An empty query yields no ranges so nothing is highlighted.
-///
-/// Both sides are Unicode-uppercased so expanding characters still match
-/// (for example `ß` → `SS`), while returned ranges stay on the original UTF-8
-/// byte indices for highlighting.
-pub(crate) fn name_match_ranges(name: &str, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-
-    let (name_folded, name_map) = fold_with_orig_ranges(name);
-    let query_folded: Vec<char> = query.chars().flat_map(char::to_uppercase).collect();
-    let qlen = query_folded.len();
-    if qlen == 0 || name_folded.len() < qlen {
-        return Vec::new();
-    }
-
-    let mut ranges = Vec::new();
-    let mut i = 0;
-    while i + qlen <= name_folded.len() {
-        if name_folded[i..i + qlen] == query_folded {
-            let start = name_map[i].0;
-            let end = name_map[i + qlen - 1].1;
-            ranges.push((start, end));
-            i += qlen;
-            while i < name_map.len() && name_map[i].0 < end {
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    ranges
-}
-
-/// Uppercase `s` and, for each produced character, the original byte range it came from.
-fn fold_with_orig_ranges(s: &str) -> (Vec<char>, Vec<(usize, usize)>) {
-    let mut folded = Vec::new();
-    let mut map = Vec::new();
-    for (byte_idx, ch) in s.char_indices() {
-        let byte_end = byte_idx + ch.len_utf8();
-        for uc in ch.to_uppercase() {
-            folded.push(uc);
-            map.push((byte_idx, byte_end));
-        }
-    }
-    (folded, map)
-}
-
 pub struct App {
     pub root: FileNode,
     pub selected_path: PathBuf,
@@ -240,6 +194,18 @@ pub struct App {
     pub home_dir: PathBuf,
     pub search_mode: bool,
     pub search_query: String,
+    /// Query the current `search_tree` was built for.
+    search_applied: String,
+    /// Whether the published snapshot finished its walk (possibly with omissions).
+    search_applied_complete: bool,
+    /// Expanded tree of directory hits and their ancestors. The live tree is
+    /// left untouched so leaving search restores it.
+    search_tree: Option<FileNode>,
+    search_phase: SearchPhase,
+    search_truncated: bool,
+    /// While this is set, newly found hits may move the cursor to a clearer
+    /// match. Arrow keys, Enter's neighbors, and scrolling turn it off.
+    search_follow_best: bool,
 }
 
 impl App {
@@ -279,6 +245,12 @@ impl App {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: home_dir.clone(),
         };
 
@@ -328,12 +300,13 @@ impl App {
 
     // Returns (prefix, node_reference)
     pub fn get_visible_nodes(&self) -> Vec<(String, &FileNode)> {
+        let root = self.view_root();
         let mut result = Vec::new();
         let mut is_last_stack = Vec::new();
-        result.push(("".to_string(), &self.root));
+        result.push(("".to_string(), root));
 
-        if self.root.expanded {
-            if let Some(children) = &self.root.children {
+        if root.expanded {
+            if let Some(children) = &root.children {
                 let count = children.len();
                 for (i, child) in children.iter().enumerate() {
                     is_last_stack.push(i == count - 1);
@@ -343,6 +316,103 @@ impl App {
             }
         }
         result
+    }
+
+    /// Filtered search tree while a query is applied, otherwise the live tree.
+    fn view_root(&self) -> &FileNode {
+        self.active_search_tree().unwrap_or(&self.root)
+    }
+
+    fn active_search_tree(&self) -> Option<&FileNode> {
+        if self.search_view_active() {
+            self.search_tree.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// True while search results are on screen.
+    ///
+    /// Stays true between keystrokes so the previous tree remains until the
+    /// debounced walk finishes and replaces it.
+    pub fn search_view_active(&self) -> bool {
+        self.search_mode && self.search_tree.is_some() && !self.search_applied.is_empty()
+    }
+
+    /// Query whose matches should be highlighted. Follows the keys immediately,
+    /// so the visible names respond before the debounced walk replaces the tree.
+    pub fn search_highlight_query(&self) -> &str {
+        if self.search_mode {
+            self.search_query.as_str()
+        } else {
+            ""
+        }
+    }
+
+    pub fn search_busy(&self) -> bool {
+        matches!(self.search_phase, SearchPhase::Scanning(_))
+    }
+
+    /// Short status for the search guide. Empty when there is nothing to add.
+    ///
+    /// A count is shown only for the tree that matches the current query, so a
+    /// half-typed query does not keep the previous total.
+    pub fn search_status(&self) -> String {
+        if !self.search_mode {
+            return String::new();
+        }
+        if self.search_view_active() && self.search_query == self.search_applied {
+            let hits = self
+                .search_tree
+                .as_ref()
+                .map(|tree| count_search_hits(tree, &self.search_applied))
+                .unwrap_or(0);
+            if hits == 0 {
+                if self.search_busy() || !self.search_applied_complete {
+                    return "Searching...".to_string();
+                }
+                return if self.search_truncated {
+                    "No matches (partial search)".to_string()
+                } else {
+                    "No matches".to_string()
+                };
+            }
+            let mut label = if hits == 1 {
+                "1 match".to_string()
+            } else {
+                format!("{hits} matches")
+            };
+            if self.search_truncated {
+                label.push_str(", partial");
+            }
+            if self.search_busy() || !self.search_applied_complete {
+                // More directories are still being opened, so the count can grow.
+                label.push_str("...");
+            }
+            return label;
+        }
+        if self.search_busy() {
+            return "Searching...".to_string();
+        }
+        String::new()
+    }
+
+    /// Idle wait before the next event. Shortens while a search is pending so
+    /// the walk starts after typing pauses and then advances in slices.
+    pub fn search_poll_timeout(&self) -> Duration {
+        const IDLE: Duration = Duration::from_millis(250);
+        match &self.search_phase {
+            SearchPhase::Waiting { since } => {
+                let elapsed = since.elapsed();
+                if elapsed >= SEARCH_DEBOUNCE {
+                    Duration::from_millis(1)
+                } else {
+                    (SEARCH_DEBOUNCE - elapsed).max(Duration::from_millis(1))
+                }
+            }
+            SearchPhase::Scanning(_) => Duration::from_millis(16),
+            SearchPhase::Idle => IDLE,
+        }
     }
 
     fn collect_visible_nodes<'a>(
@@ -368,6 +438,9 @@ impl App {
     /// Pre-load child counts for visible directory rows that haven't been counted yet.
     /// Uses lightweight `fs::read_dir` counting (no FileNode creation) and caches results.
     pub fn ensure_visible_child_counts(&mut self, first_row: usize, row_count: usize) {
+        if self.search_view_active() {
+            return;
+        }
         let show_files = self.show_files;
         let show_hidden = self.show_hidden;
         let paths: Vec<PathBuf> = self
@@ -407,6 +480,7 @@ impl App {
     }
 
     pub fn move_selection(&mut self, delta: i32) {
+        self.note_search_navigation();
         let visible = self.get_visible_nodes();
         if visible.is_empty() {
             return;
@@ -437,6 +511,11 @@ impl App {
     }
 
     pub fn expand_current(&mut self) {
+        self.note_search_navigation();
+        if self.search_view_active() {
+            self.select_search_child();
+            return;
+        }
         let show_files = self.show_files;
         let show_hidden = self.show_hidden;
         Self::find_and_modify(&mut self.root, self.selected_path.as_path(), |node| {
@@ -448,6 +527,9 @@ impl App {
     /// Toggle expansion of the currently selected node.
     /// Collapses expanded directories and expands collapsed ones; files are a no-op.
     pub fn toggle_current(&mut self) {
+        if self.search_view_active() {
+            return;
+        }
         let show_files = self.show_files;
         let show_hidden = self.show_hidden;
         let selected = self.selected_path.clone();
@@ -467,6 +549,7 @@ impl App {
     /// Select the visible node at the given flat index (as used by the List widget).
     /// Out-of-bounds indices are ignored.
     pub fn select_visible_index(&mut self, idx: usize) {
+        self.note_search_navigation();
         let visible = self.get_visible_nodes();
         if let Some((_, node)) = visible.get(idx) {
             self.selected_path = node.path.clone();
@@ -479,6 +562,7 @@ impl App {
     /// Scroll the tree viewport by `delta` rows without changing the selection.
     /// The offset is clamped to >= 0; ratatui clamps the upper bound at render time.
     pub fn scroll(&mut self, delta: i32) {
+        self.note_search_navigation();
         let current = self.list_state.offset() as i32;
         let new = (current + delta).max(0) as usize;
         *self.list_state.offset_mut() = new;
@@ -524,6 +608,9 @@ impl App {
     }
 
     pub fn is_selected_dir(&self) -> bool {
+        if let Some(tree) = self.active_search_tree() {
+            return Self::find_node(tree, self.selected_path.as_path()).is_some();
+        }
         Self::find_node(&self.root, self.selected_path.as_path())
             .map(|node| node.is_dir)
             .unwrap_or(false)
@@ -544,6 +631,11 @@ impl App {
     }
 
     pub fn on_left(&mut self) {
+        self.note_search_navigation();
+        if self.search_view_active() {
+            self.select_search_parent();
+            return;
+        }
         let selected = self.selected_path.clone();
         let parent_path = Self::find_parent_path(&self.root, selected.as_path());
         if let Some(parent) = parent_path {
@@ -592,26 +684,234 @@ impl App {
         self.refresh_after_toggle();
     }
 
-    /// Enter name-search mode with an empty query.
-    ///
-    /// Highlights apply to currently visible rows only (collapsed / not-yet-loaded
-    /// children are not searched). Matching is case-insensitive.
+    /// Enter directory search with an empty query. The live tree stays up until
+    /// a query has been idle long enough to search.
     pub fn start_search(&mut self) {
         self.search_mode = true;
         self.search_query.clear();
+        self.search_applied.clear();
+        self.search_applied_complete = false;
+        self.search_tree = None;
+        self.search_truncated = false;
+        self.search_phase = SearchPhase::Idle;
+        self.search_follow_best = true;
     }
 
     pub fn exit_search(&mut self) {
         self.search_mode = false;
         self.search_query.clear();
+        self.dismiss_search_view();
     }
 
     pub fn search_input(&mut self, c: char) {
         self.search_query.push(c);
+        self.schedule_search();
     }
 
     pub fn search_backspace(&mut self) {
-        self.search_query.pop();
+        if self.search_query.pop().is_none() {
+            return;
+        }
+        if self.search_query.is_empty() {
+            self.dismiss_search_view();
+        } else {
+            self.schedule_search();
+        }
+    }
+
+    /// Start or continue a directory walk once typing has been idle long enough.
+    pub fn poll_search(&mut self) {
+        self.poll_search_at(Instant::now());
+    }
+
+    fn poll_search_at(&mut self, now: Instant) {
+        self.poll_search_budget(now, DIRS_PER_SLICE);
+    }
+
+    fn poll_search_budget(&mut self, now: Instant, budget: usize) {
+        if !self.search_mode || self.search_query.is_empty() {
+            return;
+        }
+        let start = match &self.search_phase {
+            SearchPhase::Scanning(_) => true,
+            SearchPhase::Waiting { since } => {
+                now.saturating_duration_since(*since) >= SEARCH_DEBOUNCE
+            }
+            SearchPhase::Idle => false,
+        };
+        if !start {
+            return;
+        }
+        if matches!(self.search_phase, SearchPhase::Waiting { .. }) {
+            self.begin_scan();
+        }
+        if matches!(self.search_phase, SearchPhase::Scanning(_)) {
+            self.pump_scan_budget(budget);
+        }
+    }
+
+    fn schedule_search(&mut self) {
+        if !self.search_query.is_empty()
+            && self.search_query == self.search_applied
+            && self.search_applied_complete
+            && self.search_tree.is_some()
+        {
+            self.search_phase = SearchPhase::Idle;
+            return;
+        }
+        self.search_phase = SearchPhase::Waiting {
+            since: Instant::now(),
+        };
+    }
+
+    fn begin_scan(&mut self) {
+        let scan = SearchScan::new(
+            self.root.path.as_path(),
+            &self.search_query,
+            self.show_hidden,
+        );
+        self.search_phase = SearchPhase::Scanning(Box::new(scan));
+    }
+
+    fn pump_scan_budget(&mut self, budget: usize) {
+        let mut scan = match std::mem::replace(&mut self.search_phase, SearchPhase::Idle) {
+            SearchPhase::Scanning(scan) => scan,
+            other => {
+                self.search_phase = other;
+                return;
+            }
+        };
+        if scan.query() != self.search_query {
+            self.schedule_search();
+            return;
+        }
+        let matched_before = scan.matches().len();
+        let finished = scan.pump(budget);
+        if scan.query() != self.search_query {
+            self.schedule_search();
+            return;
+        }
+        if finished {
+            let (matches, truncated) = scan.into_result();
+            self.publish_search_matches(&matches, truncated, true);
+            self.search_phase = SearchPhase::Idle;
+            return;
+        }
+        // Show hits as soon as they exist. The rest of the walk keeps running.
+        if scan.matches().len() != matched_before && !scan.matches().is_empty() {
+            let matches = scan.matches().to_vec();
+            let truncated = scan.is_truncated();
+            self.publish_search_matches(&matches, truncated, false);
+        }
+        self.search_phase = SearchPhase::Scanning(scan);
+    }
+
+    fn publish_search_matches(&mut self, matches: &[PathBuf], truncated: bool, complete: bool) {
+        self.search_tree = Some(build_match_tree(self.root.path.as_path(), matches));
+        self.search_applied = self.search_query.clone();
+        self.search_applied_complete = complete;
+        self.search_truncated = truncated;
+        self.focus_published_results();
+    }
+
+    /// The cursor follows the clearest hit until the user moves it. A row they
+    /// chose stays put while later hits arrive, and is given up only when that
+    /// row is no longer in the result tree.
+    fn focus_published_results(&mut self) {
+        let query = self.search_applied.clone();
+        let selected = self.selected_path.clone();
+        let held = !self.search_follow_best
+            && self
+                .search_tree
+                .as_ref()
+                .is_some_and(|tree| Self::find_node(tree, selected.as_path()).is_some());
+        if held {
+            self.update_list_state();
+            return;
+        }
+        self.search_follow_best = true;
+        let Some(next) = self
+            .search_tree
+            .as_ref()
+            .map(|tree| best_hit_path(tree, &query))
+        else {
+            return;
+        };
+        let jumped = next != self.selected_path;
+        self.selected_path = next;
+        self.update_list_state();
+        // Open the result from the top. The list widget scrolls only far enough
+        // to reveal the selection, which keeps the ancestor path on screen.
+        if jumped {
+            *self.list_state.offset_mut() = 0;
+        }
+    }
+
+    fn note_search_navigation(&mut self) {
+        if self.search_view_active() {
+            self.search_follow_best = false;
+        }
+    }
+
+    fn select_search_child(&mut self) {
+        let selected = self.selected_path.clone();
+        let Some(child_path) = self.active_search_tree().and_then(|tree| {
+            let node = Self::find_node(tree, selected.as_path())?;
+            Some(node.children.as_ref()?.first()?.path.clone())
+        }) else {
+            return;
+        };
+        self.selected_path = child_path;
+        self.update_list_state();
+    }
+
+    fn select_search_parent(&mut self) {
+        let selected = self.selected_path.clone();
+        let Some(parent) = self
+            .active_search_tree()
+            .and_then(|tree| Self::find_parent_path(tree, selected.as_path()))
+        else {
+            return;
+        };
+        self.selected_path = parent;
+        self.update_list_state();
+    }
+
+    /// Drop the filtered tree and show the live tree, expanded to the selection.
+    fn dismiss_search_view(&mut self) {
+        let selected = self.selected_path.clone();
+        self.search_applied.clear();
+        self.search_applied_complete = false;
+        self.search_tree = None;
+        self.search_truncated = false;
+        self.search_phase = SearchPhase::Idle;
+        self.search_follow_best = true;
+        self.expand_to_path(selected.as_path());
+        self.selected_path = selected;
+        self.ensure_valid_selection();
+        self.update_list_state();
+    }
+
+    #[cfg(test)]
+    fn finish_search_for_test(&mut self) {
+        for _ in 0..10_000 {
+            if self.advance_search_for_test(DIRS_PER_SLICE) {
+                return;
+            }
+        }
+        panic!("directory search did not finish");
+    }
+
+    /// Run one slice of the walk. Returns true when the search is idle.
+    #[cfg(test)]
+    fn advance_search_for_test(&mut self, budget: usize) -> bool {
+        let at = match &self.search_phase {
+            SearchPhase::Idle => return true,
+            SearchPhase::Waiting { since } => *since + SEARCH_DEBOUNCE,
+            SearchPhase::Scanning(_) => Instant::now(),
+        };
+        self.poll_search_budget(at, budget);
+        matches!(self.search_phase, SearchPhase::Idle)
     }
 
     fn refresh_after_toggle(&mut self) {
@@ -713,9 +1013,111 @@ impl App {
     }
 }
 
+/// Tree of `matches` plus the ancestors that connect them to `root`.
+/// Every included directory is expanded. Branches with no hit are omitted.
+fn build_match_tree(root: &Path, matches: &[PathBuf]) -> FileNode {
+    let mut root_node = FileNode::new(root.to_path_buf(), true);
+    root_node.expanded = true;
+    root_node.children = Some(Vec::new());
+    for match_path in matches {
+        let Ok(rel) = match_path.strip_prefix(root) else {
+            continue;
+        };
+        let parts: Vec<&OsStr> = rel
+            .components()
+            .map(|component| component.as_os_str())
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        insert_match(&mut root_node, &parts);
+    }
+    sort_search_tree(&mut root_node);
+    root_node
+}
+
+fn insert_match(node: &mut FileNode, parts: &[&OsStr]) {
+    let Some((first, rest)) = parts.split_first() else {
+        return;
+    };
+    let child_path = node.path.join(first);
+    if node.children.is_none() {
+        node.children = Some(Vec::new());
+    }
+    let Some(children) = node.children.as_mut() else {
+        return;
+    };
+    if let Some(idx) = children.iter().position(|child| child.path == child_path) {
+        children[idx].expanded = true;
+        if !rest.is_empty() {
+            insert_match(&mut children[idx], rest);
+        }
+    } else {
+        let mut created = FileNode::new(child_path, true);
+        created.expanded = true;
+        if !rest.is_empty() {
+            insert_match(&mut created, rest);
+        }
+        children.push(created);
+    }
+}
+
+fn sort_search_tree(node: &mut FileNode) {
+    let Some(children) = node.children.as_mut() else {
+        return;
+    };
+    children.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
+    for child in children.iter_mut() {
+        sort_search_tree(child);
+    }
+}
+
+/// Directory hit to land on. A tighter name match wins, and a shallower path
+/// wins when the scores are equal, so the cursor starts on the clearest row.
+fn best_hit_path(tree: &FileNode, query: &str) -> PathBuf {
+    let mut best: Option<(i32, usize, PathBuf)> = None;
+    fn walk(node: &FileNode, depth: usize, query: &str, best: &mut Option<(i32, usize, PathBuf)>) {
+        if depth > 0
+            && let Some(score) = fuzzy_match_score(&node.name(), query)
+        {
+            let better = match best {
+                None => true,
+                Some((best_score, best_depth, _)) => {
+                    score > *best_score || (score == *best_score && depth < *best_depth)
+                }
+            };
+            if better {
+                *best = Some((score, depth, node.path.clone()));
+            }
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                walk(child, depth + 1, query, best);
+            }
+        }
+    }
+    walk(tree, 0, query, &mut best);
+    best.map(|(_, _, path)| path)
+        .unwrap_or_else(|| tree.path.clone())
+}
+
+fn count_search_hits(tree: &FileNode, query: &str) -> usize {
+    let mut count = 0;
+    if let Some(children) = &tree.children {
+        for child in children {
+            if fuzzy_match_ranges(&child.name(), query).is_some() {
+                count += 1;
+            }
+            count += count_search_hits(child, query);
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::SearchPhase;
     use crate::test_support::{CurrentDirGuard, EnvGuard, env_lock};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -780,6 +1182,12 @@ mod tests {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: PathBuf::from("/root"),
         }
     }
@@ -888,6 +1296,12 @@ mod tests {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: root.clone(),
         };
 
@@ -933,6 +1347,12 @@ mod tests {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: root.clone(),
         };
 
@@ -972,6 +1392,12 @@ mod tests {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: root.clone(),
         };
 
@@ -1175,6 +1601,12 @@ mod tests {
             history_list_state: ListState::default(),
             search_mode: false,
             search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
             home_dir: root.clone(),
         };
 
@@ -1484,49 +1916,554 @@ mod tests {
         assert!(app.search_query.is_empty());
     }
 
-    #[test]
-    fn name_match_ranges_empty_query_has_no_highlights() {
-        assert!(name_match_ranges("ReadMe.md", "").is_empty());
+    fn app_at(root: &Path) -> App {
+        let mut root_node = FileNode::new(root.to_path_buf(), true);
+        root_node.load_children(true, true).unwrap();
+        root_node.expanded = true;
+        App {
+            root: root_node,
+            selected_path: root.to_path_buf(),
+            startup_path: root.to_path_buf(),
+            show_files: true,
+            show_hidden: true,
+            list_state: ListState::default(),
+            config: Config::default(),
+            current_theme: Theme::default(),
+            last_theme_change: None,
+            mode: AppMode::Cd,
+            history_mode: false,
+            history: History::default(),
+            history_list_state: ListState::default(),
+            search_mode: false,
+            search_query: String::new(),
+            search_applied: String::new(),
+            search_applied_complete: false,
+            search_tree: None,
+            search_phase: SearchPhase::Idle,
+            search_truncated: false,
+            search_follow_best: true,
+            home_dir: root.to_path_buf(),
+        }
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        app.get_visible_nodes()
+            .iter()
+            .map(|(_, node)| node.name())
+            .collect()
     }
 
     #[test]
-    fn name_match_ranges_is_case_insensitive() {
-        assert_eq!(name_match_ranges("ReadMe.md", "readme"), vec![(0, 6)]);
-        assert_eq!(name_match_ranges("ReadMe.md", "MD"), vec![(7, 9)]);
-        assert_eq!(name_match_ranges("FooBar", "o"), vec![(1, 2), (2, 3)]);
+    fn build_match_tree_keeps_ancestors_and_drops_other_branches() {
+        let root = PathBuf::from("proj");
+        let alpha = root.join("src").join("alpha-target");
+        let zeta = root.join("zeta");
+        let tree = build_match_tree(&root, &[zeta.clone(), alpha.clone()]);
+
+        let names: Vec<_> = tree
+            .children
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.name())
+            .collect();
+        assert_eq!(names, vec!["src".to_string(), "zeta".to_string()]);
+
+        let src = &tree.children.as_ref().unwrap()[0];
+        assert!(src.expanded);
+        let nested = &src.children.as_ref().unwrap()[0];
+        assert_eq!(nested.path, alpha);
+        assert!(nested.children.is_none());
+        assert!(tree.expanded);
     }
 
     #[test]
-    fn name_match_ranges_finds_non_overlapping_substrings() {
+    fn search_waits_for_debounce_then_shows_expanded_hits_only() {
+        let temp = TempDir::new("cdtree_fuzzy_tree");
+        let root = temp.path.join("root");
+        create_dir(&root.join("keep").join("alpha-target"));
+        create_dir(&root.join("keep").join("other"));
+        create_dir(&root.join("skip").join("nope"));
+        create_file(&root.join("keep").join("notes-target.txt"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "target".chars() {
+            app.search_input(ch);
+        }
+
+        let since = match &app.search_phase {
+            SearchPhase::Waiting { since } => *since,
+            _ => panic!("expected the search to wait for typing to pause"),
+        };
+        app.poll_search_at(since);
+        let names = visible_names(&app);
+        assert!(names.iter().any(|name| name == "skip"));
+        assert!(!names.iter().any(|name| name == "alpha-target"));
+        assert!(!app.search_view_active());
+
+        app.finish_search_for_test();
+        assert!(app.search_view_active());
         assert_eq!(
-            name_match_ranges("ababab", "ab"),
-            vec![(0, 2), (2, 4), (4, 6)]
+            visible_names(&app),
+            vec![
+                "root".to_string(),
+                "keep".to_string(),
+                "alpha-target".to_string()
+            ]
         );
-        assert!(name_match_ranges("foo", "bar").is_empty());
-        assert!(name_match_ranges("ab", "abcdef").is_empty());
+        let visible = app.get_visible_nodes();
+        let leaf = visible
+            .iter()
+            .find(|(_, node)| node.name() == "alpha-target")
+            .unwrap();
+        assert_eq!(leaf.0, "   └─ ");
+        assert_eq!(app.selected_path, root.join("keep").join("alpha-target"));
+
+        app.on_left();
+        assert_eq!(app.selected_path, root.join("keep"));
+        app.expand_current();
+        assert_eq!(app.selected_path, root.join("keep").join("alpha-target"));
+
+        app.exit_search();
+        assert!(!app.search_mode);
+        assert!(app.search_query.is_empty());
+        let names = visible_names(&app);
+        assert!(names.iter().any(|name| name == "skip"));
+        assert!(names.iter().any(|name| name == "other"));
+        assert!(!app.search_view_active());
     }
 
     #[test]
-    fn name_match_ranges_handles_multibyte_names() {
-        // フ(0..3) ァ(3..6) イ(6..9) ル(9..12)
-        assert_eq!(name_match_ranges("ファイル", "ァイ"), vec![(3, 9)]);
-        assert_eq!(name_match_ranges("ファイル", "file"), Vec::new());
+    fn clearing_the_query_restores_the_live_tree_immediately() {
+        let temp = TempDir::new("cdtree_fuzzy_clear");
+        let root = temp.path.join("root");
+        create_dir(&root.join("keep").join("alpha-target"));
+        create_dir(&root.join("skip"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        app.search_input('g');
+        app.search_input('e');
+        app.search_input('t');
+        app.finish_search_for_test();
+        assert!(app.search_view_active());
+
+        app.search_backspace();
+        assert!(app.search_view_active());
+        assert_eq!(app.search_query, "ge");
+
+        app.search_backspace();
+        app.search_backspace();
+        assert!(app.search_query.is_empty());
+        assert!(!app.search_view_active());
+        assert!(visible_names(&app).iter().any(|name| name == "skip"));
     }
 
     #[test]
-    fn name_match_ranges_case_folds_expanding_characters() {
-        // ß uppercases to "SS", so STRASSE / strasse match the whole name.
+    fn search_shows_hits_while_the_walk_continues() {
+        let temp = TempDir::new("cdtree_fuzzy_live");
+        let root = temp.path.join("root");
+        create_dir(&root.join("keep").join("alpha-target"));
+        create_dir(&root.join("middle"));
+        create_dir(&root.join("zz").join("target"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "target".chars() {
+            app.search_input(ch);
+        }
+
+        // Opening the root only queues its children. Nothing matches yet.
+        assert!(!app.advance_search_for_test(1));
+        assert!(app.search_busy());
+        assert!(!app.search_view_active());
+        assert_eq!(app.search_status(), "Searching...");
+        assert!(visible_names(&app).iter().any(|name| name == "middle"));
+
+        // The next directory contains a hit. Show it before the walk finishes.
+        assert!(!app.advance_search_for_test(1));
+        assert!(app.search_busy());
+        assert!(app.search_view_active());
         assert_eq!(
-            name_match_ranges("Straße", "STRASSE"),
-            vec![(0, "Straße".len())]
+            visible_names(&app),
+            vec![
+                "root".to_string(),
+                "keep".to_string(),
+                "alpha-target".to_string(),
+            ]
         );
+        assert_eq!(app.selected_path, root.join("keep").join("alpha-target"));
+        assert_eq!(app.search_status(), "1 match...");
+
+        // Stay on the row the user moved to once a clearer hit shows up later.
+        app.on_left();
+        assert_eq!(app.selected_path, root.join("keep"));
+        assert!(!app.advance_search_for_test(1));
+        assert!(!app.advance_search_for_test(1));
+        assert!(app.search_busy());
+        assert_eq!(app.search_status(), "2 matches...");
+        assert_eq!(app.selected_path, root.join("keep"));
+        assert!(visible_names(&app).iter().any(|name| name == "target"));
+        assert!(!visible_names(&app).iter().any(|name| name == "middle"));
+
+        app.finish_search_for_test();
+        assert!(!app.search_busy());
+        assert_eq!(app.search_status(), "2 matches");
+        assert_eq!(app.selected_path, root.join("keep"));
+    }
+
+    #[test]
+    fn returning_to_a_partially_published_query_finishes_the_search() {
+        let temp = TempDir::new("cdtree_search_return_partial");
+        let root = temp.path.join("root");
+        create_dir(&root.join("needle-a"));
+        create_dir(&root.join("z/needle-b"));
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "needle".chars() {
+            app.search_input(ch);
+        }
+        assert!(!app.advance_search_for_test(1));
+        assert_eq!(app.search_status(), "1 match...");
+
+        app.search_input('x');
+        app.search_backspace();
+        assert_eq!(app.search_status(), "1 match...");
+        app.finish_search_for_test();
+        assert_eq!(app.search_status(), "2 matches");
+        assert!(visible_names(&app).contains(&"needle-b".to_string()));
+    }
+
+    #[test]
+    fn returning_to_a_completed_query_reuses_the_results() {
+        let temp = TempDir::new("cdtree_search_return_complete");
+        create_dir(&temp.path.join("needle"));
+        let mut app = app_at(&temp.path);
+        app.start_search();
+        for ch in "needle".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+        app.search_input('x');
+        app.search_backspace();
+        assert!(matches!(app.search_phase, SearchPhase::Idle));
+        assert_eq!(app.search_status(), "1 match");
+    }
+
+    #[test]
+    fn search_status_distinguishes_incomplete_zero_hits_and_keeps_scanning() {
+        use crate::search::ScanLimits;
+        let temp = TempDir::new("cdtree_search_partial_status");
+        create_dir(&temp.path.join("a/deep/needle"));
+        create_dir(&temp.path.join("z/needle"));
+        create_dir(&temp.path.join("zz"));
+        let mut app = app_at(&temp.path);
+        app.start_search();
+        app.search_query = "needle".to_string();
+        let scan = SearchScan::with_limits(
+            &temp.path,
+            "needle",
+            true,
+            ScanLimits {
+                max_dirs: 100,
+                max_matches: 100,
+                max_depth: 0,
+            },
+        );
+        app.search_phase = SearchPhase::Scanning(Box::new(scan));
+        app.finish_search_for_test();
+        assert_eq!(app.search_status(), "No matches (partial search)");
+        let screen = render_screen(&mut app, 60, 10);
+        assert!(screen_text(&screen).contains("No matches (partial search)"));
+
+        app.search_phase = SearchPhase::Scanning(Box::new(SearchScan::with_limits(
+            &temp.path,
+            "needle",
+            true,
+            ScanLimits {
+                max_dirs: 100,
+                max_matches: 100,
+                max_depth: 1,
+            },
+        )));
+        assert!(!app.advance_search_for_test(3));
+        assert_eq!(app.search_status(), "1 match, partial...");
+        app.finish_search_for_test();
+        assert_eq!(app.search_status(), "1 match, partial");
+    }
+
+    #[test]
+    fn search_lands_on_the_clearer_shallow_hit() {
+        let temp = TempDir::new("cdtree_fuzzy_best");
+        let root = temp.path.join("root");
+        create_dir(&root.join("Desktop"));
+        create_dir(&root.join("nested").join("mid").join("Desktop"));
+        create_dir(&root.join("skip"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "desk".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+
+        assert_eq!(app.selected_path, root.join("Desktop"));
+        assert_eq!(app.search_status(), "2 matches");
+        let names = visible_names(&app);
         assert_eq!(
-            name_match_ranges("Straße", "strasse"),
-            vec![(0, "Straße".len())]
+            names,
+            vec![
+                "root".to_string(),
+                "Desktop".to_string(),
+                "nested".to_string(),
+                "mid".to_string(),
+                "Desktop".to_string(),
+            ]
         );
-        // "ss" / "SS" maps back onto the original ß (bytes 4..6).
-        assert_eq!(name_match_ranges("Straße", "ss"), vec![(4, 6)]);
-        assert_eq!(name_match_ranges("Straße", "SS"), vec![(4, 6)]);
+        assert_eq!(app.list_state.offset(), 0);
+
+        // A hit the user already moved to stays put when it still matches.
+        app.move_selection(3);
+        assert_eq!(
+            app.selected_path,
+            root.join("nested").join("mid").join("Desktop")
+        );
+        app.search_backspace();
+        app.finish_search_for_test();
+        assert_eq!(app.search_query, "des");
+        assert_eq!(
+            app.selected_path,
+            root.join("nested").join("mid").join("Desktop")
+        );
+    }
+
+    fn render_screen(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(crate::ui::TreeWidget::new(app), frame.area());
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn screen_text(buf: &ratatui::buffer::Buffer) -> String {
+        let mut lines = Vec::new();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    fn row_with<'a>(buf: &'a ratatui::buffer::Buffer, needle: &str) -> Option<u16> {
+        (0..buf.area.height).find(|y| {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, *y)].symbol()).collect();
+            line.contains(needle)
+        })
+    }
+
+    #[test]
+    fn search_screen_keeps_the_path_and_highlights_hits() {
+        use ratatui::style::{Color, Modifier};
+
+        let temp = TempDir::new("cdtree_fuzzy_screen");
+        let root = temp.path.join("root");
+        create_dir(&root.join("Desktop"));
+        create_dir(&root.join("nested").join("mid").join("Desktop"));
+        create_dir(&root.join("keep").join("alpha-target"));
+        create_dir(&root.join("skip"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "desk".chars() {
+            app.search_input(ch);
+        }
+
+        let pending = render_screen(&mut app, 72, 16);
+        let pending_text = screen_text(&pending);
+        assert!(
+            pending_text.contains("skip"),
+            "unfiltered tree should stay up until the debounce elapses:\n{pending_text}"
+        );
+        assert!(
+            pending_text.contains("desk"),
+            "the query is shown while typing:\n{pending_text}"
+        );
+        assert!(
+            !pending_text.contains("matches"),
+            "the result count waits for the walk:\n{pending_text}"
+        );
+        let desktop_row = row_with(&pending, "Desktop").unwrap();
+        let desktop_yellow = (0..pending.area.width).any(|x| {
+            let cell = &pending[(x, desktop_row)];
+            cell.bg == Color::Yellow && cell.symbol() == "D"
+        });
+        assert!(
+            desktop_yellow,
+            "visible hits are highlighted before the tree filters"
+        );
+
+        app.finish_search_for_test();
+        let shown = render_screen(&mut app, 72, 16);
+        let shown_text = screen_text(&shown);
+        assert!(
+            !shown_text.contains("skip"),
+            "non-matching branches are hidden:\n{shown_text}"
+        );
+        assert!(
+            !shown_text.contains("alpha-target"),
+            "unrelated directories stay hidden:\n{shown_text}"
+        );
+        assert!(
+            shown_text.contains("2 matches"),
+            "the guide reports the hit count:\n{shown_text}"
+        );
+        let root_at = row_with(&shown, "root").unwrap();
+        let nested_at = row_with(&shown, "nested").unwrap();
+        let mid_at = row_with(&shown, "mid").unwrap();
+        let selected_at = (0..shown.area.height)
+            .find(|y| {
+                let line: String = (0..shown.area.width)
+                    .map(|x| shown[(x, *y)].symbol())
+                    .collect();
+                line.contains('>') && line.contains("Desktop")
+            })
+            .expect("selected hit is marked");
+        assert!(root_at < selected_at && selected_at < nested_at && nested_at < mid_at);
+        let deep = (selected_at + 1..shown.area.height)
+            .find(|y| {
+                let line: String = (0..shown.area.width)
+                    .map(|x| shown[(x, *y)].symbol())
+                    .collect();
+                line.contains("Desktop") && !line.contains('>')
+            })
+            .expect("the deeper same-named hit stays on screen");
+        assert!(mid_at < deep);
+
+        // The selected name keeps the cursor color. The match is underlined
+        // rather than punching a yellow hole in the selection.
+        let selected_row: Vec<_> = (0..shown.area.width)
+            .map(|x| shown[(x, selected_at)].clone())
+            .collect();
+        let name_at = selected_row
+            .iter()
+            .position(|cell| cell.symbol() == "D")
+            .unwrap();
+        let matched = &selected_row[name_at];
+        let unmatched = &selected_row[name_at + 4];
+        assert_eq!(unmatched.symbol(), "t");
+        assert_ne!(matched.bg, Color::Yellow);
+        assert_eq!(matched.bg, unmatched.bg);
+        assert_eq!(matched.fg, Color::Black);
+        assert!(matched.modifier.contains(Modifier::UNDERLINED));
+        assert!(matched.modifier.contains(Modifier::BOLD));
+        // Only the matched letters are underlined, so the rest of the name
+        // still reads as the cursor.
+        assert!(!unmatched.modifier.contains(Modifier::UNDERLINED));
+
+        let deep_match = (0..shown.area.width)
+            .map(|x| &shown[(x, deep)])
+            .find(|cell| cell.symbol() == "D")
+            .unwrap();
+        assert_eq!(deep_match.bg, Color::Yellow);
+        assert_eq!(deep_match.fg, Color::Black);
+
+        // Arrow keys move the cursor inside the filtered tree.
+        app.move_selection(3);
+        let moved = render_screen(&mut app, 72, 16);
+        let moved_mid = row_with(&moved, "mid").unwrap();
+        let moved_cursor = (0..moved.area.height)
+            .find(|y| {
+                let line: String = (0..moved.area.width)
+                    .map(|x| moved[(x, *y)].symbol())
+                    .collect();
+                line.contains('>') && line.contains("Desktop")
+            })
+            .expect("the cursor follows the selection");
+        assert!(moved_mid < moved_cursor);
+        let returned = (0..moved.area.height)
+            .find(|y| {
+                let line: String = (0..moved.area.width)
+                    .map(|x| moved[(x, *y)].symbol())
+                    .collect();
+                line.contains("Desktop") && !line.contains('>')
+            })
+            .unwrap();
+        let returned_match = (0..moved.area.width)
+            .map(|x| &moved[(x, returned)])
+            .find(|cell| cell.symbol() == "D")
+            .unwrap();
+        assert_eq!(returned_match.bg, Color::Yellow);
+    }
+
+    #[test]
+    fn short_screen_keeps_ancestors_above_a_deep_hit() {
+        let temp = TempDir::new("cdtree_fuzzy_short");
+        let root = temp.path.join("root");
+        create_dir(&root.join("a").join("b").join("c").join("d").join("needle"));
+        create_dir(&root.join("other"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "needle".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+        assert_eq!(
+            app.selected_path,
+            root.join("a").join("b").join("c").join("d").join("needle")
+        );
+
+        let shown = render_screen(&mut app, 40, 8);
+        let text = screen_text(&shown);
+        // The title also contains the query, so match the tree row.
+        let needle_at = row_with(&shown, "└─ needle").expect(&text);
+        let parent_at = row_with(&shown, "└─ d").expect(&text);
+        assert!(
+            parent_at < needle_at,
+            "the parent stays above the hit on a short screen:\n{text}"
+        );
+        let needle_line: String = (0..shown.area.width)
+            .map(|x| shown[(x, needle_at)].symbol())
+            .collect();
+        assert!(
+            needle_line.contains('>'),
+            "the hit row keeps the cursor:\n{text}"
+        );
+        assert!(
+            !text.contains("other"),
+            "unrelated rows stay hidden:\n{text}"
+        );
+        assert!(text.contains("1 match"), "a single hit is labeled:\n{text}");
+    }
+
+    #[test]
+    fn search_screen_reports_no_matches() {
+        let temp = TempDir::new("cdtree_fuzzy_none");
+        let root = temp.path.join("root");
+        create_dir(&root.join("skip"));
+        create_dir(&root.join("keep"));
+
+        let mut app = app_at(&root);
+        app.start_search();
+        for ch in "zzzz".chars() {
+            app.search_input(ch);
+        }
+        app.finish_search_for_test();
+
+        assert_eq!(app.search_status(), "No matches");
+        assert_eq!(app.selected_path, root);
+        let shown = render_screen(&mut app, 60, 10);
+        let text = screen_text(&shown);
+        assert!(text.contains("No matches"), "{text}");
+        assert!(text.contains("zzzz"), "{text}");
+        assert!(text.contains("root"), "{text}");
+        assert!(!text.contains("skip"), "{text}");
+        assert!(!text.contains("keep"), "{text}");
     }
 }
 
